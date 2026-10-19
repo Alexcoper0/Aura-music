@@ -1,7 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
-import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -17,15 +15,12 @@ void main() {
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
       statusBarIconBrightness: Brightness.light,
-      systemNavigationBarColor: Color(0xFF07060B),
+      systemNavigationBarColor: Color(0xFF09080F),
     ),
   );
-  runApp(const AuraLiquidApp());
+  runApp(const AuraApp());
 }
 
-// ============================================================================
-// MODELOS DE DATOS Y LETRAS SINCRONIZADAS (KARAOKE LRC)
-// ============================================================================
 class LyricLine {
   final Duration time;
   final String text;
@@ -37,14 +32,12 @@ class TrackItem {
   final String title;
   final String artist;
   final String thumb;
-  final String? directUrl;
 
   TrackItem({
     required this.id,
     required this.title,
     required this.artist,
     required this.thumb,
-    this.directUrl,
   });
 
   Map<String, dynamic> toJson() => {
@@ -52,7 +45,6 @@ class TrackItem {
         'title': title,
         'artist': artist,
         'thumb': thumb,
-        'directUrl': directUrl,
       };
 
   factory TrackItem.fromJson(Map<String, dynamic> json) => TrackItem(
@@ -60,77 +52,11 @@ class TrackItem {
         title: json['title'] ?? '',
         artist: json['artist'] ?? '',
         thumb: json['thumb'] ?? '',
-        directUrl: json['directUrl'],
       );
 }
 
-// ============================================================================
-// COMPONENTE VISUAL: LIQUID GLASS (CRISTAL LÍQUIDO ESTILO iOS)
-// ============================================================================
-class LiquidGlassBox extends StatelessWidget {
-  final Widget child;
-  final double borderRadius;
-  final EdgeInsetsGeometry? padding;
-  final double blur;
-  final Color tint;
-  final bool highlightBorder;
-
-  const LiquidGlassBox({
-    super.key,
-    required this.child,
-    this.borderRadius = 26,
-    this.padding,
-    this.blur = 28,
-    this.tint = const Color(0xFF1A162B),
-    this.highlightBorder = true,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(borderRadius),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(borderRadius),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                Colors.white.withOpacity(0.16),
-                tint.withOpacity(0.52),
-                Colors.black.withOpacity(0.45),
-              ],
-              stops: const [0.0, 0.45, 1.0],
-            ),
-            border: Border.all(
-              color: highlightBorder
-                  ? Colors.white.withOpacity(0.24)
-                  : Colors.white.withOpacity(0.10),
-              width: 1.2,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.35),
-                blurRadius: 24,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: child,
-        ),
-      ),
-    );
-  }
-}
-
-// ============================================================================
-// APLICACIÓN PRINCIPAL AURA
-// ============================================================================
-class AuraLiquidApp extends StatelessWidget {
-  const AuraLiquidApp({super.key});
+class AuraApp extends StatelessWidget {
+  const AuraApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -138,10 +64,10 @@ class AuraLiquidApp extends StatelessWidget {
       title: 'Aura',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF07060B),
+        scaffoldBackgroundColor: const Color(0xFF09080F),
         colorScheme: const ColorScheme.dark(
           primary: Color(0xFFA855F7),
-          secondary: Color(0xFF38BDF8),
+          secondary: Color(0xFF3B82F6),
         ),
       ),
       home: const AuraMainScreen(),
@@ -156,43 +82,32 @@ class AuraMainScreen extends StatefulWidget {
   State<AuraMainScreen> createState() => _AuraMainScreenState();
 }
 
-class _AuraMainScreenState extends State<AuraMainScreen>
-    with SingleTickerProviderStateMixin {
+class _AuraMainScreenState extends State<AuraMainScreen> {
   final AudioPlayer _player = AudioPlayer();
   final YoutubeExplode _yt = YoutubeExplode();
   final TextEditingController _searchController = TextEditingController();
 
-  late AnimationController _ambientController;
-
-  int _selectedTab = 0; // 0: Inicio, 1: Explorar, 2: Biblioteca
+  int _selectedTab = 0; // 0: Inicio, 1: Buscar, 2: Biblioteca
   List<TrackItem> _searchResults = [];
   List<TrackItem> _favorites = [];
   List<TrackItem> _recentTracks = [];
   bool _isLoading = false;
   bool _isBuffering = false;
-  String _statusMessage = "Audio HD • Sin anuncios";
+  String _statusMessage = "Listo para reproducir";
 
-  TrackItem _currentTrack = TrackItem(
-    id: 'init',
-    title: "Aura Liquid Glass",
-    artist: "Busca una canción para comenzar",
-    thumb: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600",
-  );
+  TrackItem? _currentTrack;
 
   List<LyricLine> _syncedLyrics = [];
-  String _plainLyrics = "Reproduce una pista para sincronizar la letra en vivo.";
+  String _plainLyrics = "Busca y reproduce cualquier canción para ver su letra.";
   bool _hasSyncedLyrics = false;
+
+  // Caché en memoria de enlaces ya resueltos para reproducción instantánea
+  final Map<String, String> _resolvedUrlsCache = {};
 
   @override
   void initState() {
     super.initState();
-    _ambientController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 18),
-    )..repeat();
-
     _loadSavedData();
-    _loadInitialTrending();
 
     _player.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
@@ -204,7 +119,6 @@ class _AuraMainScreenState extends State<AuraMainScreen>
 
   @override
   void dispose() {
-    _ambientController.dispose();
     _player.dispose();
     _yt.close();
     _searchController.dispose();
@@ -213,8 +127,8 @@ class _AuraMainScreenState extends State<AuraMainScreen>
 
   Future<void> _loadSavedData() async {
     final prefs = await SharedPreferences.getInstance();
-    final favList = prefs.getStringList('aura_favs_v2') ?? [];
-    final recList = prefs.getStringList('aura_recents_v2') ?? [];
+    final favList = prefs.getStringList('aura_clean_favs') ?? [];
+    final recList = prefs.getStringList('aura_clean_recents') ?? [];
     setState(() {
       _favorites = favList.map((e) => TrackItem.fromJson(json.decode(e))).toList();
       _recentTracks = recList.map((e) => TrackItem.fromJson(json.decode(e))).toList();
@@ -224,283 +138,189 @@ class _AuraMainScreenState extends State<AuraMainScreen>
   Future<void> _saveData() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(
-        'aura_favs_v2', _favorites.map((e) => json.encode(e.toJson())).toList());
+        'aura_clean_favs', _favorites.map((e) => json.encode(e.toJson())).toList());
     await prefs.setStringList(
-        'aura_recents_v2', _recentTracks.map((e) => json.encode(e.toJson())).toList());
-  }
-
-  Future<void> _loadInitialTrending() async {
-    await _searchMusic("Feid Ferxxo", switchTab: false);
+        'aura_clean_recents', _recentTracks.map((e) => json.encode(e.toJson())).toList());
   }
 
   // ==========================================================================
-  // BUSCADOR MULTICAPA (Combina Catálogo 320kbps + YouTube IDs)
+  // BUSCADOR DE PORTADAS CUADRADAS HD (Sin franjas negras de YouTube)
   // ==========================================================================
-  Future<void> _searchMusic(String query, {bool switchTab = true}) async {
-    if (query.trim().isEmpty) return;
+  Future<void> _searchMusic(String query) async {
+    final cleanQuery = query.trim();
+    if (cleanQuery.isEmpty) return;
+
+    FocusScope.of(context).unfocus();
     setState(() {
       _isLoading = true;
-      if (switchTab) _selectedTab = 1;
+      _selectedTab = 1;
     });
 
-    List<TrackItem> results = [];
+    List<TrackItem> found = [];
 
-    // 1. Catálogo directo con enlace M4A/320kbps listo (Saavn APIs)
-    final saavnSearchApis = [
-      "https://saavn.sumit.co/api/search/songs?query=${Uri.encodeComponent(query)}&limit=15",
-      "https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${Uri.encodeComponent(query)}",
-    ];
+    // 1. Obtenemos nombres limpios y carátulas cuadradas perfectas (600x600) sin bordes negros
+    try {
+      final url = Uri.parse(
+          'https://itunes.apple.com/search?term=${Uri.encodeComponent(cleanQuery)}&entity=song&limit=25');
+      final res = await http.get(url).timeout(const Duration(seconds: 5));
+      if (res.statusCode == 200) {
+        final data = json.decode(res.body);
+        final List list = data['results'] ?? [];
+        for (var item in list) {
+          final String art = (item['artworkUrl100'] as String? ?? '')
+              .replaceAll('100x100bb', '600x600bb');
+          found.add(TrackItem(
+            id: '', // Se resuelve al instante en YouTube al tocar
+            title: item['trackName'] ?? 'Canción',
+            artist: item['artistName'] ?? 'Artista',
+            thumb: art.isNotEmpty
+                ? art
+                : 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500',
+          ));
+        }
+      }
+    } catch (_) {}
 
-    for (final apiUrl in saavnSearchApis) {
-      if (results.isNotEmpty) break;
+    // 2. Si el catálogo de portadas no responde, usamos búsqueda directa de YouTube
+    if (found.isEmpty) {
       try {
-        final res = await http.get(Uri.parse(apiUrl)).timeout(const Duration(seconds: 4));
-        if (res.statusCode == 200) {
-          final data = json.decode(res.body);
-          final List items = data['data']?['results'] ?? [];
-          for (var item in items) {
-            final List imgs = item['image'] ?? [];
-            final List dls = item['downloadUrl'] ?? [];
-            final String thumbUrl = imgs.isNotEmpty
-                ? (imgs.last['url'] ?? imgs.last['link'] ?? '')
-                : '';
-            final String audioUrl = dls.isNotEmpty
-                ? (dls.last['url'] ?? dls.last['link'] ?? '')
-                : '';
-            final String artistName = (item['artists']?['primary'] as List?)
-                    ?.map((a) => a['name'])
-                    .join(', ') ??
-                item['primaryArtists'] ??
-                'Artista';
-
-            if (audioUrl.isNotEmpty) {
-              results.add(TrackItem(
-                id: item['id']?.toString() ?? '',
-                title: _cleanHtml(item['name'] ?? 'Canción'),
-                artist: _cleanHtml(artistName.toString()),
-                thumb: thumbUrl.isNotEmpty
-                    ? thumbUrl
-                    : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500',
-                directUrl: audioUrl,
-              ));
-            }
-          }
+        final ytRes = await _yt.search.search("$cleanQuery official audio");
+        for (var v in ytRes) {
+          found.add(TrackItem(
+            id: v.id.value,
+            title: v.title,
+            artist: v.author.replaceAll(' - Topic', ''),
+            thumb: v.thumbnails.highResUrl,
+          ));
         }
       } catch (_) {}
     }
 
-    // 2. Complemento con búsqueda de YouTube
-    try {
-      final ytList = await _yt.search
-          .search("$query official audio")
-          .timeout(const Duration(seconds: 5));
-      for (var v in ytList) {
-        results.add(TrackItem(
-          id: v.id.value,
-          title: v.title,
-          artist: v.author.replaceAll(' - Topic', '').replaceAll('VEVO', ''),
-          thumb: v.thumbnails.highResUrl,
-        ));
-      }
-    } catch (_) {}
-
     if (mounted) {
       setState(() {
-        _searchResults = results;
+        _searchResults = found;
         _isLoading = false;
       });
     }
   }
 
-  String _cleanHtml(String input) {
-    return input
-        .replaceAll('&quot;', '"')
-        .replaceAll('&amp;', '&')
-        .replaceAll('&#039;', "'");
-  }
-
   // ==========================================================================
-  // MOTOR DE AUDIO INFALIBLE (320kbps Directo + Archivo Físico Local Temporal)
+  // MOTOR DE AUDIO QUE SÍ FUNCIONÓ EN TU CELULAR (SIN RETRASOS ADELANTE)
   // ==========================================================================
   Future<void> _playTrack(TrackItem track) async {
     setState(() {
       _currentTrack = track;
       _isBuffering = true;
-      _statusMessage = "Sincronizando audio HD...";
+      _statusMessage = "Cargando pista...";
     });
 
-    _recentTracks.removeWhere((t) => t.title == track.title);
+    // Guardar en historial reciente
+    _recentTracks.removeWhere((t) => t.title == track.title && t.artist == track.artist);
     _recentTracks.insert(0, track);
-    if (_recentTracks.length > 15) _recentTracks.removeLast();
+    if (_recentTracks.length > 12) _recentTracks.removeLast();
     _saveData();
 
+    // Buscar letra sincronizada en paralelo
     _fetchSyncedLyrics(track.title, track.artist);
 
+    final cacheKey = "${track.title}_${track.artist}";
+
     try {
-      await _player.stop();
-    } catch (_) {}
-
-    final cleanTitle = track.title
-        .replaceAll(RegExp(r'\(.*?\)|\[.*?\]|Official|Audio|Video|Lyrics|Visualizer', caseSensitive: false), '')
-        .trim();
-    final cleanArtist = track.artist.split(',').first.split('&').first.trim();
-
-    // NIVEL 1: Si ya trae URL directa de 320kbps, reproduce al instante
-    if (track.directUrl != null && track.directUrl!.isNotEmpty) {
-      try {
-        await _player.setUrl(track.directUrl!).timeout(const Duration(seconds: 5));
+      // Si ya habíamos cargado esta canción antes, suena en 0.2 segundos
+      if (_resolvedUrlsCache.containsKey(cacheKey)) {
+        await _player.setUrl(_resolvedUrlsCache[cacheKey]!);
         _player.play();
         setState(() {
           _isBuffering = false;
-          _statusMessage = "320kbps Liquid Audio • En vivo";
+          _statusMessage = "Sonando en alta calidad";
         });
         return;
-      } catch (_) {}
-    }
-
-    // NIVEL 2: Buscar stream 320kbps en espejos de música
-    final mirrorEndpoints = [
-      "https://saavn.sumit.co/api/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
-      "https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
-    ];
-
-    for (final url in mirrorEndpoints) {
-      try {
-        final r = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 4));
-        if (r.statusCode == 200) {
-          final d = json.decode(r.body);
-          final List resList = d['data']?['results'] ?? [];
-          if (resList.isNotEmpty) {
-            final List dls = resList[0]['downloadUrl'] ?? [];
-            if (dls.isNotEmpty) {
-              final String bestLink = dls.last['url'] ?? dls.last['link'] ?? '';
-              if (bestLink.isNotEmpty) {
-                await _player.setUrl(bestLink).timeout(const Duration(seconds: 5));
-                _player.play();
-                setState(() {
-                  _isBuffering = false;
-                  _statusMessage = "320kbps Liquid Audio • En vivo";
-                });
-                return;
-              }
-            }
-          }
-        }
-      } catch (_) {}
-    }
-
-    // NIVEL 3: Descarga rápida a archivo temporal físico en el teléfono (Cero error 403)
-    setState(() => _statusMessage = "Desbloqueando pista desde la nube...");
-
-    String videoId = track.id;
-    if (videoId.isEmpty || videoId.length < 8) {
-      try {
-        final s = await _yt.search
-            .search("$cleanTitle $cleanArtist audio")
-            .timeout(const Duration(seconds: 4));
-        if (s.isNotEmpty) videoId = s.first.id.value;
-      } catch (_) {}
-    }
-
-    if (videoId.isNotEmpty) {
-      final clientCombinations = [
-        [YoutubeApiClient.ios],
-        [YoutubeApiClient.androidVr],
-        [YoutubeApiClient.safari],
-        [YoutubeApiClient.tv],
-      ];
-
-      for (final clients in clientCombinations) {
-        try {
-          final manifest = await _yt.videos.streamsClient
-              .getManifest(videoId, ytClients: clients)
-              .timeout(const Duration(seconds: 5));
-
-          StreamInfo? chosenStream;
-          final mp4Audio = manifest.audioOnly
-              .where((s) => s.container.name.toLowerCase() == 'mp4')
-              .toList();
-          if (mp4Audio.isNotEmpty) {
-            mp4Audio.sort((a, b) => b.bitrate.compareTo(a.bitrate));
-            chosenStream = mp4Audio.first;
-          } else if (manifest.muxed.isNotEmpty) {
-            chosenStream = manifest.muxed.withHighestBitrate();
-          } else if (manifest.audioOnly.isNotEmpty) {
-            chosenStream = manifest.audioOnly.withHighestBitrate();
-          }
-
-          if (chosenStream != null) {
-            try {
-              final tempDir = Directory.systemTemp;
-              final tempFile = File('${tempDir.path}/aura_track_$videoId.mp4');
-
-              if (!await tempFile.exists() || await tempFile.length() < 40000) {
-                final byteStream = _yt.videos.streamsClient.get(chosenStream);
-                final sink = tempFile.openWrite();
-                await byteStream.pipe(sink).timeout(const Duration(seconds: 12));
-                await sink.flush();
-                await sink.close();
-              }
-
-              if (await tempFile.exists() && await tempFile.length() > 20000) {
-                await _player.setFilePath(tempFile.path);
-                _player.play();
-                setState(() {
-                  _isBuffering = false;
-                  _statusMessage = "Audio Caché HD • Sin anuncios";
-                });
-                return;
-              }
-            } catch (_) {
-              await _player.setAudioSource(
-                AudioSource.uri(
-                  chosenStream.url,
-                  headers: const {'User-Agent': 'Mozilla/5.0'},
-                ),
-              ).timeout(const Duration(seconds: 5));
-              _player.play();
-              setState(() {
-                _isBuffering = false;
-                _statusMessage = "Streaming Directo • En vivo";
-              });
-              return;
-            }
-          }
-        } catch (_) {}
       }
-    }
 
-    setState(() {
-      _isBuffering = false;
-      _statusMessage = "Toca otra versión de la lista";
-    });
+      // 1. Obtener el ID exacto de YouTube para la pista de audio oficial
+      String videoId = track.id;
+      if (videoId.isEmpty) {
+        final searchList = await _yt.search
+            .search("${track.title} ${track.artist} official audio")
+            .timeout(const Duration(seconds: 5));
+        if (searchList.isNotEmpty) {
+          videoId = searchList.first.id.value;
+        }
+      }
+
+      if (videoId.isEmpty) throw Exception("No video ID");
+
+      // 2. Extraer el Manifiesto exactamente con el método que SÍ te funcionó:
+      // Clientes androidVr + safari + ios, priorizando el stream MUXED y MP4
+      final manifest = await _yt.videos.streamsClient.getManifest(
+        videoId,
+        ytClients: [
+          YoutubeApiClient.androidVr,
+          YoutubeApiClient.safari,
+          YoutubeApiClient.ios,
+        ],
+      ).timeout(const Duration(seconds: 6));
+
+      final List<String> candidateUrls = [];
+
+      // El stream muxed fue el que permitió que tu Android reprodujera la canción completa sin Error 403
+      if (manifest.muxed.isNotEmpty) {
+        candidateUrls.add(manifest.muxed.withHighestBitrate().url.toString());
+      }
+
+      final mp4Audios = manifest.audioOnly
+          .where((s) => s.container.name.toLowerCase() == 'mp4')
+          .toList();
+      if (mp4Audios.isNotEmpty) {
+        mp4Audios.sort((a, b) => b.bitrate.compareTo(a.bitrate));
+        candidateUrls.add(mp4Audios.first.url.toString());
+      }
+
+      if (manifest.audioOnly.isNotEmpty) {
+        candidateUrls.add(manifest.audioOnly.withHighestBitrate().url.toString());
+      }
+
+      for (final streamUrl in candidateUrls) {
+        try {
+          await _player.setUrl(streamUrl).timeout(const Duration(seconds: 6));
+          _resolvedUrlsCache[cacheKey] = streamUrl;
+          _player.play();
+          if (mounted) {
+            setState(() {
+              _isBuffering = false;
+              _statusMessage = "Toca para ver la letra en vivo 🎤";
+            });
+          }
+          return;
+        } catch (_) {
+          // Si el primer candidato falla, prueba el siguiente inmediatamente
+        }
+      }
+    } catch (_) {}
+
+    if (mounted) {
+      setState(() {
+        _isBuffering = false;
+        _statusMessage = "No se pudo abrir, intenta otra pista";
+      });
+    }
   }
 
   // ==========================================================================
-  // MOTOR DE LETRAS SINCRONIZADAS EN TIEMPO REAL (KARAOKE LRC)
+  // BUSCADOR DE LETRAS SINCRONIZADAS (LRC KARAOKE)
   // ==========================================================================
   Future<void> _fetchSyncedLyrics(String rawTitle, String rawArtist) async {
     setState(() {
       _syncedLyrics = [];
       _hasSyncedLyrics = false;
-      _plainLyrics = "Sincronizando letra con la voz del artista...";
+      _plainLyrics = "Buscando letra sincronizada...";
     });
 
     final cleanTitle = rawTitle
         .replaceAll(RegExp(r'\(.*?\)|\[.*?\]', caseSensitive: false), '')
         .replaceAll(RegExp(r'Official|Audio|Video|Visualizer|Lyrics|feat\..*|ft\..*', caseSensitive: false), '')
-        .split('-')
-        .last
         .trim();
-
-    final cleanArtist = rawArtist
-        .replaceAll(' - Topic', '')
-        .replaceAll('VEVO', '')
-        .split('&')
-        .first
-        .split(',')
-        .first
-        .trim();
+    final cleanArtist = rawArtist.split(',').first.split('&').first.trim();
 
     try {
       final url = Uri.parse(
@@ -538,7 +358,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
     } catch (_) {}
 
     setState(() {
-      _plainLyrics = "Letra sincronizada no disponible para '$cleanTitle'.";
+      _plainLyrics = "Letra no disponible para '$cleanTitle'.";
       _hasSyncedLyrics = false;
     });
   }
@@ -551,8 +371,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
       if (match != null) {
         final min = int.parse(match.group(1)!);
         final sec = int.parse(match.group(2)!);
-        final msStr = match.group(3)!;
-        final ms = int.parse(msStr.padRight(3, '0'));
+        final ms = int.parse(match.group(3)!.padRight(3, '0'));
         final text = match.group(4)!.trim();
         if (text.isNotEmpty) {
           lines.add(LyricLine(
@@ -567,8 +386,8 @@ class _AuraMainScreenState extends State<AuraMainScreen>
 
   void _playNextTrack() {
     final list = _selectedTab == 2 ? _favorites : _searchResults;
-    if (list.isEmpty) return;
-    final idx = list.indexWhere((t) => t.title == _currentTrack.title);
+    if (list.isEmpty || _currentTrack == null) return;
+    final idx = list.indexWhere((t) => t.title == _currentTrack!.title);
     if (idx != -1 && idx + 1 < list.length) {
       _playTrack(list[idx + 1]);
     }
@@ -576,8 +395,8 @@ class _AuraMainScreenState extends State<AuraMainScreen>
 
   void _playPrevTrack() {
     final list = _selectedTab == 2 ? _favorites : _searchResults;
-    if (list.isEmpty) return;
-    final idx = list.indexWhere((t) => t.title == _currentTrack.title);
+    if (list.isEmpty || _currentTrack == null) return;
+    final idx = list.indexWhere((t) => t.title == _currentTrack!.title);
     if (idx > 0) {
       _playTrack(list[idx - 1]);
     } else {
@@ -601,14 +420,54 @@ class _AuraMainScreenState extends State<AuraMainScreen>
     return _favorites.any((t) => t.title == track.title && t.artist == track.artist);
   }
 
+  void _showImportDialog() {
+    final linkController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF161421),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+        title: const Text("Importar o Buscar Música"),
+        content: TextField(
+          controller: linkController,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: "Escribe artista, canción o pega enlace...",
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancelar"),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final text = linkController.text.trim();
+              Navigator.pop(context);
+              if (text.isNotEmpty) {
+                _searchController.text = text;
+                _searchMusic(text);
+              }
+            },
+            child: const Text("Buscar"),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ==========================================================================
-  // REPRODUCTOR APPLE MUSIC + LIQUID GLASS A PANTALLA COMPLETA
+  // REPRODUCTOR PANTALLA COMPLETA (60 FPS FLUIDO + KARAOKE EN VIVO)
   // ==========================================================================
-  void _openLiquidPlayer() {
+  void _openFullPlayer() {
+    if (_currentTrack == null) return;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.transparent,
+      backgroundColor: const Color(0xFF0D0B14),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+      ),
       builder: (context) {
         bool showLyricsView = false;
         final ScrollController lyricsScrollController = ScrollController();
@@ -616,444 +475,367 @@ class _AuraMainScreenState extends State<AuraMainScreen>
 
         return StatefulBuilder(
           builder: (context, setModalState) {
+            final track = _currentTrack!;
             return Container(
-              height: MediaQuery.of(context).size.height * 0.94,
-              decoration: const BoxDecoration(
-                color: Color(0xFF07060B),
-                borderRadius: BorderRadius.vertical(top: Radius.circular(38)),
+              height: MediaQuery.of(context).size.height * 0.92,
+              padding: const EdgeInsets.fromLTRB(24, 14, 24, 24),
+              decoration: BoxDecoration(
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+                gradient: const LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Color(0xFF23153C),
+                    Color(0xFF0E0C16),
+                    Color(0xFF09080F),
+                  ],
+                ),
+                border: Border.all(color: Colors.white.withOpacity(0.12), width: 1),
               ),
-              child: ClipRRect(
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(38)),
-                child: Stack(
-                  children: [
-                    // 1. FONDO DINÁMICO ANIMADO CON LA PORTADA DEL ÁLBUM
-                    Positioned.fill(
-                      child: AnimatedBuilder(
-                        animation: _ambientController,
-                        builder: (context, _) {
-                          return Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              Transform.scale(
-                                scale: 1.45,
-                                child: Transform.rotate(
-                                  angle: _ambientController.value * 2 * math.pi * 0.15,
-                                  child: Image.network(
-                                    _currentTrack.thumb,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => Container(color: const Color(0xFF1E1035)),
-                                  ),
+              child: StreamBuilder<PlayerState>(
+                stream: _player.playerStateStream,
+                builder: (context, stateSnap) {
+                  final isPlaying = _player.playing &&
+                      stateSnap.data?.processingState != ProcessingState.completed;
+
+                  return Column(
+                    children: [
+                      Container(
+                        width: 42,
+                        height: 5,
+                        decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Selector Portada vs Letra Sincronizada
+                      Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(100),
+                          border: Border.all(color: Colors.white.withOpacity(0.12)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            GestureDetector(
+                              onTap: () => setModalState(() => showLyricsView = false),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: !showLyricsView
+                                      ? const Color(0xFF7C3AED)
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(100),
+                                ),
+                                child: const Text(
+                                  "Portada",
+                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                                 ),
                               ),
-                              BackdropFilter(
-                                filter: ImageFilter.blur(sigmaX: 65, sigmaY: 65),
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topCenter,
-                                      end: Alignment.bottomCenter,
-                                      colors: [
-                                        Colors.black.withOpacity(0.35),
-                                        const Color(0xFF07060B).withOpacity(0.78),
-                                        const Color(0xFF07060B).withOpacity(0.95),
+                            ),
+                            GestureDetector(
+                              onTap: () => setModalState(() => showLyricsView = true),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: showLyricsView
+                                      ? const Color(0xFF7C3AED)
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(100),
+                                ),
+                                child: const Row(
+                                  children: [
+                                    Icon(Icons.lyrics_rounded, size: 16, color: Colors.white),
+                                    SizedBox(width: 6),
+                                    Text(
+                                      "Letra en Vivo",
+                                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+
+                      // Vista Central: Portada Elástica Apple Music o Karaoke
+                      Expanded(
+                        child: !showLyricsView
+                            ? Center(
+                                child: AnimatedScale(
+                                  scale: isPlaying ? 1.0 : 0.88,
+                                  duration: const Duration(milliseconds: 350),
+                                  curve: Curves.easeOutCubic,
+                                  child: Container(
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(26),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: const Color(0xFF7C3AED)
+                                              .withOpacity(isPlaying ? 0.45 : 0.15),
+                                          blurRadius: 36,
+                                          offset: const Offset(0, 14),
+                                        ),
                                       ],
                                     ),
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(26),
+                                      child: Image.network(
+                                        track.thumb,
+                                        width: 280,
+                                        height: 280,
+                                        fit: BoxFit.cover,
+                                      ),
+                                    ),
                                   ),
+                                ),
+                              )
+                            : StreamBuilder<Duration>(
+                                stream: _player.positionStream,
+                                builder: (context, posSnap) {
+                                  final currentPos = posSnap.data ?? Duration.zero;
+
+                                  if (!_hasSyncedLyrics) {
+                                    return Container(
+                                      width: double.infinity,
+                                      padding: const EdgeInsets.all(20),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withOpacity(0.06),
+                                        borderRadius: BorderRadius.circular(24),
+                                        border: Border.all(color: Colors.white12),
+                                      ),
+                                      child: SingleChildScrollView(
+                                        child: Text(
+                                          _plainLyrics,
+                                          style: const TextStyle(
+                                            fontSize: 16.5,
+                                            height: 1.65,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  }
+
+                                  int activeIndex = 0;
+                                  for (int i = 0; i < _syncedLyrics.length; i++) {
+                                    if (currentPos >= _syncedLyrics[i].time) {
+                                      activeIndex = i;
+                                    } else {
+                                      break;
+                                    }
+                                  }
+
+                                  if (activeIndex != lastScrolledIndex &&
+                                      lyricsScrollController.hasClients) {
+                                    lastScrolledIndex = activeIndex;
+                                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                                      if (lyricsScrollController.hasClients) {
+                                        final target = (activeIndex * 62.0) - 100.0;
+                                        lyricsScrollController.animateTo(
+                                          target.clamp(
+                                            0.0,
+                                            lyricsScrollController.position.maxScrollExtent,
+                                          ),
+                                          duration: const Duration(milliseconds: 350),
+                                          curve: Curves.easeOutCubic,
+                                        );
+                                      }
+                                    });
+                                  }
+
+                                  return Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 18, vertical: 12),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withOpacity(0.06),
+                                      borderRadius: BorderRadius.circular(24),
+                                      border: Border.all(color: Colors.white12),
+                                    ),
+                                    child: ListView.builder(
+                                      controller: lyricsScrollController,
+                                      itemCount: _syncedLyrics.length,
+                                      itemBuilder: (context, index) {
+                                        final line = _syncedLyrics[index];
+                                        final isCurrent = index == activeIndex;
+                                        return GestureDetector(
+                                          onTap: () => _player.seek(line.time),
+                                          child: Padding(
+                                            padding: const EdgeInsets.symmetric(vertical: 10),
+                                            child: Text(
+                                              line.text,
+                                              style: TextStyle(
+                                                fontSize: isCurrent ? 21 : 16,
+                                                fontWeight: isCurrent
+                                                    ? FontWeight.w800
+                                                    : FontWeight.w500,
+                                                color: isCurrent
+                                                    ? Colors.white
+                                                    : Colors.white.withOpacity(0.35),
+                                                height: 1.35,
+                                              ),
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                      const SizedBox(height: 20),
+
+                      // Título y Corazón
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  track.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 21, fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  track.artist,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 15, color: Color(0xFF9CA3AF)),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            icon: Icon(
+                              _isFavorite(track)
+                                  ? Icons.favorite_rounded
+                                  : Icons.favorite_border_rounded,
+                              color: _isFavorite(track)
+                                  ? const Color(0xFFA855F7)
+                                  : Colors.white70,
+                              size: 30,
+                            ),
+                            onPressed: () {
+                              _toggleFavorite(track);
+                              setModalState(() {});
+                            },
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+
+                      // Barra de tiempo real
+                      StreamBuilder<Duration>(
+                        stream: _player.positionStream,
+                        builder: (context, snapshot) {
+                          final pos = snapshot.data ?? Duration.zero;
+                          final total = _player.duration ?? Duration.zero;
+                          final maxSec = total.inSeconds.toDouble() > 0
+                              ? total.inSeconds.toDouble()
+                              : 1.0;
+                          return Column(
+                            children: [
+                              Slider(
+                                activeColor: const Color(0xFFA855F7),
+                                inactiveColor: Colors.white24,
+                                value: pos.inSeconds.toDouble().clamp(0, maxSec),
+                                max: maxSec,
+                                onChanged: (val) {
+                                  _player.seek(Duration(seconds: val.toInt()));
+                                },
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text(
+                                      "${pos.inMinutes}:${(pos.inSeconds % 60).toString().padLeft(2, '0')}",
+                                      style: const TextStyle(
+                                          fontSize: 12, color: Colors.white60),
+                                    ),
+                                    Text(
+                                      "${total.inMinutes}:${(total.inSeconds % 60).toString().padLeft(2, '0')}",
+                                      style: const TextStyle(
+                                          fontSize: 12, color: Colors.white60),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
                           );
                         },
                       ),
-                    ),
+                      const SizedBox(height: 12),
 
-                    // 2. CONTENIDO DEL REPRODUCTOR LIQUID GLASS
-                    StreamBuilder<PlayerState>(
-                      stream: _player.playerStateStream,
-                      builder: (context, stateSnap) {
-                        final isPlaying = _player.playing &&
-                            stateSnap.data?.processingState != ProcessingState.completed;
-
-                        return Padding(
-                          padding: const EdgeInsets.fromLTRB(24, 14, 24, 24),
-                          child: Column(
-                            children: [
-                              Container(
-                                width: 46,
-                                height: 5,
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.35),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                              ),
-                              const SizedBox(height: 16),
-
-                              // Selector Superior: Portada Viva vs Letra en Vivo
-                              LiquidGlassBox(
-                                borderRadius: 100,
-                                padding: const EdgeInsets.all(5),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    GestureDetector(
-                                      onTap: () => setModalState(() => showLyricsView = false),
-                                      child: AnimatedContainer(
-                                        duration: const Duration(milliseconds: 250),
-                                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                                        decoration: BoxDecoration(
-                                          color: !showLyricsView
-                                              ? Colors.white.withOpacity(0.22)
-                                              : Colors.transparent,
-                                          borderRadius: BorderRadius.circular(100),
-                                        ),
-                                        child: const Text(
-                                          "Portada Viva",
-                                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                                        ),
-                                      ),
-                                    ),
-                                    GestureDetector(
-                                      onTap: () => setModalState(() => showLyricsView = true),
-                                      child: AnimatedContainer(
-                                        duration: const Duration(milliseconds: 250),
-                                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                                        decoration: BoxDecoration(
-                                          color: showLyricsView
-                                              ? Colors.white.withOpacity(0.22)
-                                              : Colors.transparent,
-                                          borderRadius: BorderRadius.circular(100),
-                                        ),
-                                        child: const Row(
-                                          children: [
-                                            Icon(Icons.lyrics_rounded, size: 16, color: Color(0xFFD8B4FE)),
-                                            SizedBox(width: 6),
-                                            Text(
-                                              "Letra en Vivo",
-                                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(height: 22),
-
-                              // ÁREA CENTRAL: PORTADA ANIMADA APPLE MUSIC O KARAOKE EN TIEMPO REAL
-                              Expanded(
-                                child: AnimatedSwitcher(
-                                  duration: const Duration(milliseconds: 400),
-                                  child: !showLyricsView
-                                      ? Center(
-                                          key: const ValueKey("artwork_view"),
-                                          child: AnimatedScale(
-                                            scale: isPlaying ? 1.02 : 0.86,
-                                            duration: const Duration(milliseconds: 550),
-                                            curve: Curves.easeOutBack,
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                borderRadius: BorderRadius.circular(30),
-                                                boxShadow: [
-                                                  BoxShadow(
-                                                    color: const Color(0xFFA855F7)
-                                                        .withOpacity(isPlaying ? 0.50 : 0.15),
-                                                    blurRadius: isPlaying ? 50 : 20,
-                                                    spreadRadius: isPlaying ? 6 : 0,
-                                                    offset: const Offset(0, 18),
-                                                  ),
-                                                ],
-                                              ),
-                                              child: ClipRRect(
-                                                borderRadius: BorderRadius.circular(30),
-                                                child: Image.network(
-                                                  _currentTrack.thumb,
-                                                  width: 300,
-                                                  height: 300,
-                                                  fit: BoxFit.cover,
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        )
-                                      : StreamBuilder<Duration>(
-                                          key: const ValueKey("lyrics_view"),
-                                          stream: _player.positionStream,
-                                          builder: (context, posSnap) {
-                                            final currentPos = posSnap.data ?? Duration.zero;
-
-                                            if (!_hasSyncedLyrics) {
-                                              return LiquidGlassBox(
-                                                padding: const EdgeInsets.all(22),
-                                                child: SingleChildScrollView(
-                                                  child: Text(
-                                                    _plainLyrics,
-                                                    textAlign: TextAlign.center,
-                                                    style: const TextStyle(
-                                                      fontSize: 18,
-                                                      height: 1.7,
-                                                      fontWeight: FontWeight.w600,
-                                                      color: Colors.white,
-                                                    ),
-                                                  ),
-                                                ),
-                                              );
-                                            }
-
-                                            int activeIndex = 0;
-                                            for (int i = 0; i < _syncedLyrics.length; i++) {
-                                              if (currentPos >= _syncedLyrics[i].time) {
-                                                activeIndex = i;
-                                              } else {
-                                                break;
-                                              }
-                                            }
-
-                                            if (activeIndex != lastScrolledIndex &&
-                                                lyricsScrollController.hasClients) {
-                                              lastScrolledIndex = activeIndex;
-                                              WidgetsBinding.instance.addPostFrameCallback((_) {
-                                                if (lyricsScrollController.hasClients) {
-                                                  final targetOffset = (activeIndex * 66.0) - 110.0;
-                                                  lyricsScrollController.animateTo(
-                                                    targetOffset.clamp(
-                                                      0.0,
-                                                      lyricsScrollController.position.maxScrollExtent,
-                                                    ),
-                                                    duration: const Duration(milliseconds: 450),
-                                                    curve: Curves.easeOutCubic,
-                                                  );
-                                                }
-                                              });
-                                            }
-
-                                            return LiquidGlassBox(
-                                              padding: const EdgeInsets.symmetric(
-                                                  horizontal: 18, vertical: 14),
-                                              child: ListView.builder(
-                                                controller: lyricsScrollController,
-                                                itemCount: _syncedLyrics.length,
-                                                itemBuilder: (context, index) {
-                                                  final line = _syncedLyrics[index];
-                                                  final isCurrent = index == activeIndex;
-                                                  return GestureDetector(
-                                                    onTap: () => _player.seek(line.time),
-                                                    child: AnimatedContainer(
-                                                      duration: const Duration(milliseconds: 300),
-                                                      padding: const EdgeInsets.symmetric(vertical: 12),
-                                                      child: AnimatedDefaultTextStyle(
-                                                        duration: const Duration(milliseconds: 300),
-                                                        style: TextStyle(
-                                                          fontSize: isCurrent ? 23 : 16.5,
-                                                          fontWeight: isCurrent
-                                                              ? FontWeight.w900
-                                                              : FontWeight.w500,
-                                                          color: isCurrent
-                                                              ? Colors.white
-                                                              : Colors.white.withOpacity(0.32),
-                                                          height: 1.35,
-                                                          shadows: isCurrent
-                                                              ? [
-                                                                  const Shadow(
-                                                                    color: Color(0xFFA855F7),
-                                                                    blurRadius: 18,
-                                                                  )
-                                                                ]
-                                                              : [],
-                                                        ),
-                                                        child: Text(line.text),
-                                                      ),
-                                                    ),
-                                                  );
-                                                },
-                                              ),
-                                            );
-                                          },
-                                        ),
-                                ),
-                              ),
-                              const SizedBox(height: 20),
-
-                              // TÍTULO, ARTISTA Y FAVORITO
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          _currentTrack.title,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontSize: 22,
-                                            fontWeight: FontWeight.w800,
-                                            letterSpacing: -0.4,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          _currentTrack.artist,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            fontSize: 15.5,
-                                            color: Colors.white.withOpacity(0.68),
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  IconButton(
-                                    icon: Icon(
-                                      _isFavorite(_currentTrack)
-                                          ? Icons.favorite_rounded
-                                          : Icons.favorite_border_rounded,
-                                      color: _isFavorite(_currentTrack)
-                                          ? const Color(0xFFD8B4FE)
-                                          : Colors.white70,
-                                      size: 30,
-                                    ),
-                                    onPressed: () {
-                                      _toggleFavorite(_currentTrack);
-                                      setModalState(() {});
-                                    },
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-
-                              // BARRA DE PROGRESO CRISTAL
-                              StreamBuilder<Duration>(
-                                stream: _player.positionStream,
-                                builder: (context, snapshot) {
-                                  final pos = snapshot.data ?? Duration.zero;
-                                  final total = _player.duration ?? Duration.zero;
-                                  final maxSec = total.inSeconds.toDouble() > 0
-                                      ? total.inSeconds.toDouble()
-                                      : 1.0;
-                                  return Column(
-                                    children: [
-                                      SliderTheme(
-                                        data: SliderTheme.of(context).copyWith(
-                                          trackHeight: 5,
-                                          thumbShape: const RoundSliderThumbShape(
-                                              enabledThumbRadius: 7),
-                                          activeTrackColor: Colors.white,
-                                          inactiveTrackColor: Colors.white24,
-                                          thumbColor: Colors.white,
-                                        ),
-                                        child: Slider(
-                                          value: pos.inSeconds.toDouble().clamp(0, maxSec),
-                                          max: maxSec,
-                                          onChanged: (val) {
-                                            _player.seek(Duration(seconds: val.toInt()));
-                                          },
-                                        ),
-                                      ),
-                                      Padding(
-                                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                                        child: Row(
-                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                          children: [
-                                            Text(
-                                              "${pos.inMinutes}:${(pos.inSeconds % 60).toString().padLeft(2, '0')}",
-                                              style: const TextStyle(
-                                                  fontSize: 12, color: Colors.white60),
-                                            ),
-                                            Text(
-                                              _statusMessage,
-                                              style: const TextStyle(
-                                                  fontSize: 11, color: Color(0xFFD8B4FE)),
-                                            ),
-                                            Text(
-                                              "${total.inMinutes}:${(total.inSeconds % 60).toString().padLeft(2, '0')}",
-                                              style: const TextStyle(
-                                                  fontSize: 12, color: Colors.white60),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  );
-                                },
-                              ),
-                              const SizedBox(height: 16),
-
-                              // CONTROLES EN CÁPSULA LIQUID GLASS
-                              LiquidGlassBox(
-                                borderRadius: 34,
-                                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 18),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                                  children: [
-                                    IconButton(
-                                      icon: const Icon(Icons.lyrics_outlined, size: 26),
-                                      onPressed: () =>
-                                          setModalState(() => showLyricsView = !showLyricsView),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.skip_previous_rounded, size: 40),
-                                      onPressed: () {
-                                        _playPrevTrack();
-                                        setModalState(() {});
-                                      },
-                                    ),
-                                    GestureDetector(
-                                      onTap: () {
-                                        if (isPlaying) {
-                                          _player.pause();
-                                        } else {
-                                          _player.play();
-                                        }
-                                        setModalState(() {});
-                                      },
-                                      child: Container(
-                                        width: 68,
-                                        height: 68,
-                                        decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          gradient: const LinearGradient(
-                                            colors: [Color(0xFFA855F7), Color(0xFF3B82F6)],
-                                          ),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: const Color(0xFFA855F7).withOpacity(0.5),
-                                              blurRadius: 20,
-                                            ),
-                                          ],
-                                        ),
-                                        child: Icon(
-                                          isPlaying
-                                              ? Icons.pause_rounded
-                                              : Icons.play_arrow_rounded,
-                                          size: 40,
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.skip_next_rounded, size: 40),
-                                      onPressed: () {
-                                        _playNextTrack();
-                                        setModalState(() {});
-                                      },
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.replay_rounded, size: 26),
-                                      onPressed: () => _player.seek(Duration.zero),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
+                      // Controles principales
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.lyrics_outlined, size: 26),
+                            onPressed: () =>
+                                setModalState(() => showLyricsView = !showLyricsView),
                           ),
-                        );
-                      },
-                    ),
-                  ],
-                ),
+                          IconButton(
+                            icon: const Icon(Icons.skip_previous_rounded, size: 38),
+                            onPressed: () {
+                              _playPrevTrack();
+                              setModalState(() {});
+                            },
+                          ),
+                          GestureDetector(
+                            onTap: () {
+                              if (isPlaying) {
+                                _player.pause();
+                              } else {
+                                _player.play();
+                              }
+                              setModalState(() {});
+                            },
+                            child: Container(
+                              width: 68,
+                              height: 68,
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                gradient: LinearGradient(
+                                  colors: [Color(0xFF7C3AED), Color(0xFF3B82F6)],
+                                ),
+                              ),
+                              child: Icon(
+                                isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                                size: 38,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.skip_next_rounded, size: 38),
+                            onPressed: () {
+                              _playNextTrack();
+                              setModalState(() {});
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.replay_rounded, size: 26),
+                            onPressed: () => _player.seek(Duration.zero),
+                          ),
+                        ],
+                      ),
+                    ],
+                  );
+                },
               ),
             );
           },
@@ -1063,51 +845,19 @@ class _AuraMainScreenState extends State<AuraMainScreen>
   }
 
   // ==========================================================================
-  // PANTALLA PRINCIPAL CON FONDO DE CRISTAL LÍQUIDO VIVO
+  // INTERFAZ PRINCIPAL LIMPIA Y ULTRA FLUIDA (SIN BLURS PESADOS EN LISTAS)
   // ==========================================================================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Stack(
-        children: [
-          // 1. FONDO AMBIENTAL DINÁMICO QUE CAMBIA CON LA CANCIÓN ACTUAL
-          Positioned.fill(
-            child: AnimatedBuilder(
-              animation: _ambientController,
-              builder: (context, _) {
-                return Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Opacity(
-                      opacity: 0.42,
-                      child: Transform.scale(
-                        scale: 1.3,
-                        child: Image.network(
-                          _currentTrack.thumb,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => Container(color: const Color(0xFF07060B)),
-                        ),
-                      ),
-                    ),
-                    BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 70, sigmaY: 70),
-                      child: Container(
-                        color: const Color(0xFF07060B).withOpacity(0.76),
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-          ),
-
-          // 2. CONTENIDO PRINCIPAL CON TRANSICIONES SUAVES
-          SafeArea(
-            child: Column(
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Column(
               children: [
-                // HEADER LIQUID GLASS
+                // Encabezado original de Aura
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 10),
+                  padding: const EdgeInsets.fromLTRB(20, 14, 20, 10),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -1116,27 +866,33 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                           const Text(
                             "Aura",
                             style: TextStyle(
-                              fontSize: 32,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: -0.8,
+                              fontSize: 30,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: -0.5,
                             ),
                           ),
-                          const SizedBox(width: 6),
-                          Icon(Icons.blur_on_rounded,
-                              color: Colors.purpleAccent.shade100, size: 28),
+                          const SizedBox(width: 5),
+                          Icon(Icons.graphic_eq_rounded,
+                              color: Colors.purpleAccent.shade200, size: 26),
                         ],
                       ),
                       GestureDetector(
                         onTap: () => launchUrl(Uri.parse("https://ko-fi.com")),
-                        child: const LiquidGlassBox(
-                          borderRadius: 100,
-                          padding: EdgeInsets.symmetric(horizontal: 15, vertical: 8),
-                          child: Row(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF171522),
+                            borderRadius: BorderRadius.circular(100),
+                            border: Border.all(
+                                color: const Color(0xFFA855F7).withOpacity(0.8),
+                                width: 1.2),
+                          ),
+                          child: const Row(
                             children: [
                               Text("☕ ", style: TextStyle(fontSize: 14)),
                               Text(
                                 "Apóyanos",
-                                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
                               ),
                             ],
                           ),
@@ -1146,400 +902,412 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                   ),
                 ),
 
-                // BARRA DE BÚSQUEDA DE CRISTAL LÍQUIDO
+                // Barra de Búsqueda Limpia
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-                  child: LiquidGlassBox(
-                    borderRadius: 100,
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    child: TextField(
-                      controller: _searchController,
-                      onSubmitted: (v) => _searchMusic(v),
-                      style: const TextStyle(color: Colors.white),
-                      decoration: InputDecoration(
-                        hintText: "Artistas, canciones o pega un link...",
-                        hintStyle: TextStyle(color: Colors.white.withOpacity(0.55)),
-                        prefixIcon: const Icon(Icons.search_rounded, color: Colors.white70),
-                        suffixIcon: IconButton(
-                          icon: const Icon(Icons.arrow_forward_rounded, color: Color(0xFFD8B4FE)),
-                          onPressed: () => _searchMusic(_searchController.text),
-                        ),
-                        border: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                  child: TextField(
+                    controller: _searchController,
+                    onSubmitted: _searchMusic,
+                    decoration: InputDecoration(
+                      hintText: "¿Qué quieres escuchar hoy?",
+                      hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+                      prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF9CA3AF)),
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.arrow_forward_rounded,
+                            color: Color(0xFFA855F7)),
+                        onPressed: () => _searchMusic(_searchController.text),
+                      ),
+                      filled: true,
+                      fillColor: const Color(0xFF171522),
+                      contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(100),
+                        borderSide: BorderSide(color: Colors.white.withOpacity(0.08)),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(100),
+                        borderSide: BorderSide(color: Colors.white.withOpacity(0.08)),
                       ),
                     ),
                   ),
                 ),
 
-                // CUERPO CAMBIANTE CON ANIMACIÓN FLUIDA ENTRE PESTAÑAS
+                // Contenido principal a 60 FPS
                 Expanded(
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 350),
-                    child: _buildCurrentTabContent(),
-                  ),
+                  child: _buildBody(),
                 ),
               ],
             ),
-          ),
 
-          // 3. MINI-REPRODUCTOR FLOTANTE LIQUID GLASS + BARRA DE NAVEGACIÓN DE CRISTAL
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  GestureDetector(
-                    onTap: _openLiquidPlayer,
-                    child: LiquidGlassBox(
-                      borderRadius: 24,
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      child: Row(
-                        children: [
-                          Hero(
-                            tag: 'player_thumb',
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(14),
-                              child: Image.network(
-                                _currentTrack.thumb,
-                                width: 48,
-                                height: 48,
-                                fit: BoxFit.cover,
-                              ),
+            // Mini-Reproductor Flotante (Solo aparece o muestra la pista actual con Cristal real)
+            if (_currentTrack != null)
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: GestureDetector(
+                    onTap: _openFullPlayer,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(20),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                        child: Container(
+                          height: 68,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF171522).withOpacity(0.88),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: const Color(0xFFA855F7).withOpacity(0.55),
+                              width: 1.2,
                             ),
                           ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  _isBuffering
-                                      ? _statusMessage
-                                      : "Toca para abrir Liquid Player & Karaoke 🎤",
-                                  style: const TextStyle(
-                                      fontSize: 10.5,
-                                      color: Color(0xFFD8B4FE),
-                                      fontWeight: FontWeight.w600),
+                          child: Row(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: Image.network(
+                                  _currentTrack!.thumb,
+                                  width: 46,
+                                  height: 46,
+                                  fit: BoxFit.cover,
                                 ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  _currentTrack.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.bold, fontSize: 14.5),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      _statusMessage,
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.purpleAccent.shade100),
+                                    ),
+                                    Text(
+                                      _currentTrack!.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.bold, fontSize: 14),
+                                    ),
+                                  ],
                                 ),
-                              ],
-                            ),
-                          ),
-                          if (_isBuffering)
-                            const Padding(
-                              padding: EdgeInsets.all(10),
-                              child: SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2.4, color: Colors.white),
                               ),
-                            )
-                          else
-                            IconButton(
-                              icon: Icon(
-                                _player.playing
-                                    ? Icons.pause_circle_filled_rounded
-                                    : Icons.play_circle_fill_rounded,
-                                size: 38,
-                                color: Colors.white,
+                              if (_isBuffering)
+                                const Padding(
+                                  padding: EdgeInsets.all(10),
+                                  child: SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(strokeWidth: 2.4),
+                                  ),
+                                )
+                              else
+                                IconButton(
+                                  icon: Icon(
+                                    _player.playing
+                                        ? Icons.pause_rounded
+                                        : Icons.play_arrow_rounded,
+                                    size: 32,
+                                  ),
+                                  onPressed: () {
+                                    if (_player.playing) {
+                                      _player.pause();
+                                    } else {
+                                      _player.play();
+                                    }
+                                  },
+                                ),
+                              IconButton(
+                                icon: const Icon(Icons.skip_next_rounded, size: 28),
+                                onPressed: _playNextTrack,
                               ),
-                              onPressed: () {
-                                if (_player.playing) {
-                                  _player.pause();
-                                } else {
-                                  _player.play();
-                                }
-                              },
-                            ),
-                          IconButton(
-                            icon: const Icon(Icons.skip_next_rounded, size: 28),
-                            onPressed: _playNextTrack,
+                            ],
                           ),
-                        ],
+                        ),
                       ),
                     ),
                   ),
-                  const SizedBox(height: 10),
-
-                  // Barra de Navegación Flotante iOS Liquid Glass
-                  LiquidGlassBox(
-                    borderRadius: 100,
-                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        _glassNavItem(0, Icons.home_rounded, "Inicio"),
-                        _glassNavItem(1, Icons.graphic_eq_rounded, "Explorar"),
-                        _glassNavItem(2, Icons.favorite_rounded, "Biblioteca"),
-                      ],
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
-          ),
+          ],
+        ),
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _selectedTab,
+        onTap: (index) => setState(() => _selectedTab = index),
+        backgroundColor: const Color(0xFF09080F),
+        selectedItemColor: const Color(0xFFA855F7),
+        unselectedItemColor: const Color(0xFF9CA3AF),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.home_filled), label: "Inicio"),
+          BottomNavigationBarItem(icon: Icon(Icons.search_rounded), label: "Buscar"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.library_music_rounded), label: "Mi Biblioteca"),
         ],
       ),
     );
   }
 
-  Widget _glassNavItem(int index, IconData icon, String label) {
-    final isSelected = _selectedTab == index;
-    return GestureDetector(
-      onTap: () => setState(() => _selectedTab = index),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 250),
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
-        decoration: BoxDecoration(
-          color: isSelected ? Colors.white.withOpacity(0.18) : Colors.transparent,
-          borderRadius: BorderRadius.circular(100),
-        ),
-        child: Row(
-          children: [
-            Icon(icon,
-                size: 20,
-                color: isSelected ? Colors.white : Colors.white.withOpacity(0.55)),
-            if (isSelected) ...[
-              const SizedBox(width: 6),
-              Text(
-                label,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCurrentTabContent() {
+  Widget _buildBody() {
     if (_selectedTab == 2) {
+      // MI BIBLIOTECA
       return ListView(
-        key: const ValueKey("tab_library"),
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 175),
+        padding: const EdgeInsets.fromLTRB(20, 14, 20, 100),
         children: [
           const Text("Tus Favoritos ❤️",
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+              style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold)),
           const SizedBox(height: 12),
           if (_favorites.isEmpty)
-            const LiquidGlassBox(
-              padding: EdgeInsets.all(28),
-              child: Text(
-                "Aún no has guardado canciones.\nToca el corazón ❤️ en cualquier pista para guardarla en tu biblioteca.",
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white70, height: 1.5),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 50),
+              child: Center(
+                child: Text(
+                  "Tu biblioteca está vacía.\nBusca tus canciones favoritas y toca el corazón ❤️.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Color(0xFF9CA3AF), height: 1.5),
+                ),
               ),
             )
           else
-            ..._favorites.map((t) => _glassTrackTile(t)),
+            ..._favorites.map((t) => _trackTile(t)),
         ],
       );
     }
 
     if (_selectedTab == 1) {
-      return ListView(
-        key: const ValueKey("tab_explore"),
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 175),
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text("Catálogo en Alta Calidad",
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-              if (_isLoading)
-                const SizedBox(
-                    width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
-            ],
+      // BUSCADOR
+      if (_isLoading) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      if (_searchResults.isEmpty) {
+        return const Center(
+          child: Text(
+            "Escribe el nombre de cualquier canción o artista\nen la barra superior para comenzar.",
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Color(0xFF9CA3AF), height: 1.5),
           ),
-          const SizedBox(height: 12),
-          ..._searchResults.map((t) => _glassTrackTile(t)),
-        ],
+        );
+      }
+      return ListView.builder(
+        padding: const EdgeInsets.fromLTRB(20, 10, 20, 100),
+        itemCount: _searchResults.length,
+        itemBuilder: (context, index) => _trackTile(_searchResults[index]),
       );
     }
 
+    // PESTAÑA 0: INICIO (100% NEUTRO, FIEL AL DISEÑO ORIGINAL QUE TE GUSTÓ)
     return ListView(
-      key: const ValueKey("tab_home"),
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 175),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 100),
       children: [
-        LiquidGlassBox(
-          borderRadius: 28,
-          padding: const EdgeInsets.all(22),
-          tint: const Color(0xFF5B21B6),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Row(
-                children: [
-                  Icon(Icons.auto_awesome, color: Color(0xFFD8B4FE), size: 20),
-                  SizedBox(width: 8),
-                  Text("AURA LIQUID ENGINE",
-                      style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 1.2,
-                          color: Color(0xFFD8B4FE))),
-                ],
+        // Tarjeta Principal con el Degradado Original de Aura
+        GestureDetector(
+          onTap: _showImportDialog,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(22),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              gradient: const LinearGradient(
+                colors: [Color(0xFF7C3AED), Color(0xFF4F46E5), Color(0xFF3B82F6)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
-              const SizedBox(height: 8),
-              const Text(
-                "Música sin límites,\nletras vivas y cero anuncios.",
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, height: 1.2),
-              ),
-              const SizedBox(height: 14),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    _moodChip("🔥 Feid / Reggaetón", "Feid Ferxxo"),
-                    _moodChip("🌙 Night Drive Synth", "Synthwave chill"),
-                    _moodChip("🎧 Lo-Fi Focus", "Lofi beats study"),
-                    _moodChip("⚡ Éxitos Globales", "Top hits 2026"),
-                  ],
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF7C3AED).withOpacity(0.32),
+                  blurRadius: 22,
+                  offset: const Offset(0, 8),
                 ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  "Importa tu música\nsin contraseñas",
+                  style: TextStyle(
+                      fontSize: 23, fontWeight: FontWeight.bold, height: 1.2),
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.28),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.link_rounded, color: Colors.white70),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          "Pega un enlace de Spotify o YouTube aquí",
+                          style: TextStyle(color: Colors.white, fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 28),
+
+        // Sección Tus Playlists (Diseño limpio original)
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text("Tus Playlists",
+                style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+            GestureDetector(
+              onTap: _showImportDialog,
+              child: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: const BoxDecoration(
+                    color: Color(0xFF171522), shape: BoxShape.circle),
+                child: const Icon(Icons.add, size: 20),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          height: 145,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            children: [
+              GestureDetector(
+                onTap: () => setState(() => _selectedTab = 2),
+                child: _playlistCard(
+                    "Favoritos (${_favorites.length})", Icons.favorite_rounded, const Color(0xFF9333EA)),
+              ),
+              GestureDetector(
+                onTap: () => _searchMusic("Chill Lofi Study Beats"),
+                child: _playlistCard(
+                    "Para Concentrarse", Icons.self_improvement_rounded, const Color(0xFF0D9488)),
+              ),
+              GestureDetector(
+                onTap: () => _searchMusic("Night Drive Synthwave"),
+                child: _playlistCard(
+                    "Viaje Nocturno", Icons.nightlight_round, const Color(0xFF3B82F6)),
               ),
             ],
           ),
         ),
-        const SizedBox(height: 24),
 
         if (_recentTracks.isNotEmpty) ...[
-          const Text("Escuchado Recientemente",
-              style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 12),
-          SizedBox(
-            height: 155,
-            child: ListView.builder(
-              scrollDirection: Axis.horizontal,
-              itemCount: _recentTracks.length,
-              itemBuilder: (context, i) {
-                final tr = _recentTracks[i];
-                return GestureDetector(
-                  onTap: () => _playTrack(tr),
-                  child: Container(
-                    width: 118,
-                    margin: const EdgeInsets.only(right: 14),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(20),
-                          child: Image.network(tr.thumb,
-                              width: 118, height: 110, fit: BoxFit.cover),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(tr.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 12.5)),
-                        Text(tr.artist,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(color: Colors.white60, fontSize: 11)),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
           const SizedBox(height: 22),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text("Escuchado Recientemente",
+                  style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+              TextButton(
+                onPressed: () {
+                  setState(() => _recentTracks.clear());
+                  _saveData();
+                },
+                child: const Text("Limpiar", style: TextStyle(fontSize: 13)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ..._recentTracks.map((t) => _trackTile(t)),
         ],
-
-        const Text("Recomendado para ti",
-            style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
-        if (_isLoading)
-          const Padding(
-            padding: EdgeInsets.all(32),
-            child: Center(child: CircularProgressIndicator()),
-          )
-        else
-          ..._searchResults.take(10).map((t) => _glassTrackTile(t)),
       ],
     );
   }
 
-  Widget _moodChip(String label, String query) {
-    return GestureDetector(
-      onTap: () => _searchMusic(query),
-      child: Container(
-        margin: const EdgeInsets.only(right: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.14),
-          borderRadius: BorderRadius.circular(100),
-          border: Border.all(color: Colors.white24),
+  Widget _trackTile(TrackItem track) {
+    final isFav = _isFavorite(track);
+    final isPlayingThis = _currentTrack?.title == track.title &&
+        _currentTrack?.artist == track.artist;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF151320),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: isPlayingThis
+              ? const Color(0xFFA855F7)
+              : Colors.white.withOpacity(0.07),
         ),
-        child: Text(label,
-            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        leading: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image.network(track.thumb, width: 52, height: 52, fit: BoxFit.cover),
+        ),
+        title: Text(
+          track.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: isPlayingThis ? const Color(0xFFD8B4FE) : Colors.white,
+          ),
+        ),
+        subtitle: Text(
+          track.artist,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: Icon(
+                isFav ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                color: isFav ? const Color(0xFFA855F7) : Colors.white54,
+              ),
+              onPressed: () => _toggleFavorite(track),
+            ),
+            const Icon(Icons.play_circle_fill_rounded,
+                color: Color(0xFFA855F7), size: 32),
+          ],
+        ),
+        onTap: () => _playTrack(track),
       ),
     );
   }
 
-  Widget _glassTrackTile(TrackItem track) {
-    final isFav = _isFavorite(track);
-    final isCurrent = _currentTrack.title == track.title;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: GestureDetector(
-        onTap: () => _playTrack(track),
-        child: LiquidGlassBox(
-          borderRadius: 20,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          highlightBorder: isCurrent,
-          child: Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(13),
-                child: Image.network(track.thumb, width: 54, height: 54, fit: BoxFit.cover),
+  Widget _playlistCard(String title, IconData icon, Color color) {
+    return Container(
+      width: 120,
+      margin: const EdgeInsets.only(right: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            height: 105,
+            width: 120,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              gradient: LinearGradient(
+                colors: [color, color.withOpacity(0.45)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      track.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                        color: isCurrent ? const Color(0xFFD8B4FE) : Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      track.artist,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: Colors.white.withOpacity(0.62), fontSize: 13),
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                icon: Icon(
-                  isFav ? Icons.favorite_rounded : Icons.favorite_border_rounded,
-                  color: isFav ? const Color(0xFFD8B4FE) : Colors.white60,
-                ),
-                onPressed: () => _toggleFavorite(track),
-              ),
-              const Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 32),
-            ],
+              border: Border.all(color: Colors.white.withOpacity(0.15)),
+            ),
+            child: Icon(icon, size: 40, color: Colors.white),
           ),
-        ),
+          const SizedBox(height: 8),
+          Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+        ],
       ),
     );
   }
