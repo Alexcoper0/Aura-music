@@ -1,0 +1,36 @@
+name: Fabricar Aura APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar tu codigo
+        uses: actions/checkout@v4
+
+      - name: Instalar Flutter en el servidor
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Generar estructura Android automaticamente
+        run: |
+          flutter create --platforms=android --org com.aura.music .
+          # Asegurar permiso de Internet en Android para streaming
+          sed -i '/<application/i <uses-permission android:name="android.permission.INTERNET"/>' android/app/src/main/AndroidManifest.xml
+
+      - name: Descargar librerias de audio
+        run: flutter pub get
+
+      - name: Compilar archivo APK
+        run: flutter build apk --release
+
+      - name: Entregar APK listo para descargar
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aura-Music-Instalador
+          path: build/app/outputs/flutter-apk/app-release.apk
