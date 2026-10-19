@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
 import 'package:flutter/material.dart';
@@ -9,6 +10,58 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const AuraApp());
+}
+
+// ============================================================================
+// TRUCO DE HARMONY MUSIC / MUSIFY (GITHUB):
+// Proxy de Bytes en Memoria RAM. Evita que Android (ExoPlayer) sea bloqueado
+// por YouTube (Error 403), inyectando los bytes directo desde YoutubeExplode.
+// ============================================================================
+class YouTubeAudioSource extends StreamAudioSource {
+  final YoutubeExplode yt;
+  final AudioStreamInfo streamInfo;
+
+  YouTubeAudioSource({
+    required this.yt,
+    required this.streamInfo,
+    super.tag,
+  });
+
+  @override
+  Future<StreamAudioResponse> request([int? start, int? end]) async {
+    final totalBytes = streamInfo.size.totalBytes;
+    final startByte = start ?? 0;
+    final endByte = end ?? totalBytes;
+
+    // Obtenemos el flujo real de bytes autorizado por YoutubeExplode
+    final rawStream = yt.videos.streamsClient.get(streamInfo);
+
+    // Si Android pide un rango específico (al adelantar la canción), cortamos los bytes exactos
+    Stream<List<int>> slicedStream() async* {
+      int offset = 0;
+      await for (final chunk in rawStream) {
+        final chunkStart = offset;
+        final chunkEnd = offset + chunk.length;
+        offset = chunkEnd;
+
+        if (chunkEnd <= startByte) continue;
+        if (chunkStart >= endByte) break;
+
+        final sliceStart = (startByte > chunkStart) ? (startByte - chunkStart) : 0;
+        final sliceEnd = (endByte < chunkEnd) ? (endByte - chunkStart) : chunk.length;
+
+        yield chunk.sublist(sliceStart, sliceEnd);
+      }
+    }
+
+    return StreamAudioResponse(
+      sourceLength: totalBytes,
+      contentLength: endByte - startByte,
+      offset: startByte,
+      stream: (startByte == 0 && endByte == totalBytes) ? rawStream : slicedStream(),
+      contentType: streamInfo.codec.mimeType,
+    );
+  }
 }
 
 class TrackItem {
@@ -137,7 +190,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     }
   }
 
-  // Buscador Directo
+  // Buscador de canciones
   Future<void> _searchMusic(String query) async {
     if (query.trim().isEmpty) return;
     setState(() {
@@ -165,128 +218,159 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     });
   }
 
-  // MOTOR QUE SÍ FUNCIONÓ (MUXED + ANDROID VR DIRECTO SIN ESPERAS ADELANTE)
+  // ==========================================================================
+  // MOTOR DE REPRODUCCIÓN DEFINITIVO (Arquitectura Harmony Music + Spotube)
+  // ==========================================================================
   Future<void> _playTrack(TrackItem track) async {
+    await _player.stop();
     setState(() {
       _currentTrack = track;
       _isBuffering = true;
-      _statusMessage = "Cargando pista...";
+      _statusMessage = "Conectando audio...";
       _currentLyrics = "Cargando letra de ${track.title}...";
     });
 
     _fetchLyrics(track.title, track.artist);
 
-    String videoId = track.id;
     final cleanTitle = track.title
-        .replaceAll(RegExp(r'\(.*?\)|\[.*?\]|Official|Audio|Video|Lyrics', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\(.*?\)|\[.*?\]|Official|Audio|Video|Lyrics|Visualizer', caseSensitive: false), '')
         .trim();
-    final cleanArtist = track.artist.replaceAll(' - Topic', '').split('&').first.trim();
+    final cleanArtist = track.artist.replaceAll(' - Topic', '').replaceAll('VEVO', '').split('&').first.trim();
 
-    // Si viene sin ID de YouTube, lo buscamos en 2 segundos
-    if (videoId.isEmpty || RegExp(r'^[0-9]+$').hasMatch(videoId)) {
+    // ------------------------------------------------------------------------
+    // VÍA 1: Servir archivos M4A de 320kbps directos desde las APIs de Spotube/Saavn
+    // (Cargan en < 1 segundo y jamás tienen restricción de YouTube)
+    // ------------------------------------------------------------------------
+    final saavnEndpoints = [
+      "https://saavn.sumit.co/api/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
+      "https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
+    ];
+
+    for (final endpoint in saavnEndpoints) {
       try {
-        final searchList = await _yt.search
-            .search("$cleanTitle $cleanArtist audio")
-            .timeout(const Duration(seconds: 4));
-        if (searchList.isNotEmpty) {
-          videoId = searchList.first.id.value;
+        final res = await http.get(Uri.parse(endpoint)).timeout(const Duration(seconds: 3));
+        if (res.statusCode == 200) {
+          final body = json.decode(res.body);
+          final List results = body['data']?['results'] ?? [];
+          if (results.isNotEmpty) {
+            final List downloadUrls = results[0]['downloadUrl'] ?? [];
+            if (downloadUrls.isNotEmpty) {
+              final String directUrl = downloadUrls.last['url'] ?? downloadUrls.last['link'] ?? "";
+              if (directUrl.isNotEmpty) {
+                await _player.setUrl(directUrl).timeout(const Duration(seconds: 4));
+                _player.play();
+                setState(() {
+                  _isBuffering = false;
+                  _statusMessage = "Toca aquí para ver la Letra 🎤";
+                });
+                return;
+              }
+            }
+          }
         }
       } catch (_) {}
     }
 
-    // PASO 1 DIRECTO (Sin Saavn estorbando): Extraemos el stream Muxed y MP4 con los clientes desbloqueados
+    // ------------------------------------------------------------------------
+    // VÍA 2: Túnel de Bytes de Harmony Music (YouTubeAudioSource)
+    // Pasa los bytes crudos de YouTube al reproductor sin que ExoPlayer dé Error 403
+    // ------------------------------------------------------------------------
+    String videoId = track.id;
+    if (videoId.isEmpty) {
+      try {
+        final s = await _yt.search.search("$cleanTitle $cleanArtist audio").timeout(const Duration(seconds: 4));
+        if (s.isNotEmpty) videoId = s.first.id.value;
+      } catch (_) {}
+    }
+
     if (videoId.isNotEmpty) {
-      final clientGroups = [
-        [YoutubeApiClient.androidVr, YoutubeApiClient.safari],
-        [YoutubeApiClient.ios, YoutubeApiClient.android],
+      // Probamos diferentes clientes de extracción en orden de compatibilidad actual
+      final clientsToTry = [
+        [YoutubeApiClient.ios],
+        [YoutubeApiClient.androidVr],
+        [YoutubeApiClient.safari],
+        [YoutubeApiClient.android],
         [YoutubeApiClient.tv],
       ];
 
-      for (final group in clientGroups) {
+      for (final clientGroup in clientsToTry) {
         try {
           final manifest = await _yt.videos.streamsClient
-              .getManifest(videoId, ytClients: group)
+              .getManifest(videoId, ytClients: clientGroup)
               .timeout(const Duration(seconds: 5));
 
-          final List<Uri> urlsToTry = [];
-
-          // 1ro: MUXED (Es el que NUNCA tiene bloqueo 403 en Android y te funcionó al 100%)
-          final muxed = manifest.muxed.toList();
-          if (muxed.isNotEmpty) {
-            urlsToTry.add(muxed.withHighestBitrate().url);
+          // Seleccionamos el stream de audio (preferiblemente mp4/m4a o el de mayor bitrate)
+          AudioStreamInfo? selectedStream;
+          final mp4Audios = manifest.audioOnly.where((s) => s.container.name == 'mp4').toList();
+          if (mp4Audios.isNotEmpty) {
+            mp4Audios.sort((a, b) => b.bitrate.compareTo(a.bitrate));
+            selectedStream = mp4Audios.first;
+          } else if (manifest.audioOnly.isNotEmpty) {
+            selectedStream = manifest.audioOnly.withHighestBitrate();
           }
 
-          // 2do: Audio MP4/M4A
-          final audioMp4 = manifest.audioOnly.where((s) => s.container.name == 'mp4').toList();
-          if (audioMp4.isNotEmpty) {
-            audioMp4.sort((a, b) => b.bitrate.compareTo(a.bitrate));
-            urlsToTry.add(audioMp4.first.url);
-          }
-
-          // 3ro: Cualquier audio restante
-          if (manifest.audioOnly.isNotEmpty) {
-            urlsToTry.add(manifest.audioOnly.withHighestBitrate().url);
-          }
-
-          for (final uri in urlsToTry) {
+          if (selectedStream != null) {
+            // Intento A: Inyección por Proxy de Bytes (Método Harmony Music)
             try {
-              // Enviamos User-Agent limpio para evitar rechazos del reproductor de Android
-              await _player.setAudioSource(
-                AudioSource.uri(
-                  uri,
-                  headers: const {
-                    'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-                  },
-                ),
-              ).timeout(const Duration(seconds: 5));
-
+              await _player
+                  .setAudioSource(YouTubeAudioSource(yt: _yt, streamInfo: selectedStream))
+                  .timeout(const Duration(seconds: 5));
               _player.play();
               setState(() {
                 _isBuffering = false;
                 _statusMessage = "Toca aquí para ver la Letra 🎤";
               });
               return;
-            } catch (_) {}
+            } catch (_) {
+              // Intento B: Si el proxy de bytes falla en ese cliente, probamos URL directa del stream Muxed
+              if (manifest.muxed.isNotEmpty) {
+                await _player
+                    .setUrl(manifest.muxed.withHighestBitrate().url.toString())
+                    .timeout(const Duration(seconds: 4));
+                _player.play();
+                setState(() {
+                  _isBuffering = false;
+                  _statusMessage = "Toca aquí para ver la Letra 🎤";
+                });
+                return;
+              }
+            }
           }
         } catch (_) {}
       }
     }
 
-    // PASO 2 DE EMERGENCIA: Jiosaavn en paralelo por si un video tiene restricción de edad en YouTube
-    try {
-      final res = await http
-          .get(Uri.parse("https://saavn.dev/api/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}"))
-          .timeout(const Duration(seconds: 4));
-      if (res.statusCode == 200) {
-        final body = json.decode(res.body);
-        final List results = body['data']?['results'] ?? [];
-        if (results.isNotEmpty) {
-          final List downloadUrls = results[0]['downloadUrl'] ?? [];
-          if (downloadUrls.isNotEmpty) {
-            final String bestUrl = downloadUrls.last['url'] ?? downloadUrls.last['link'] ?? "";
-            if (bestUrl.isNotEmpty) {
-              await _player.setUrl(bestUrl);
-              _player.play();
-              setState(() {
-                _isBuffering = false;
-                _statusMessage = "Toca aquí para ver la Letra 🎤";
-              });
-              return;
-            }
+    // ------------------------------------------------------------------------
+    // VÍA 3: Respaldo de Piped / Invidious actualizado
+    // ------------------------------------------------------------------------
+    final mirrorApis = [
+      "https://api.piped.private.coffee/streams/$videoId",
+      "https://pipedapi.kavin.rocks/streams/$videoId",
+    ];
+
+    for (final api in mirrorApis) {
+      try {
+        final r = await http.get(Uri.parse(api)).timeout(const Duration(seconds: 4));
+        if (r.statusCode == 200) {
+          final d = json.decode(r.body);
+          final List streams = d['audioStreams'] ?? [];
+          if (streams.isNotEmpty) {
+            await _player.setUrl(streams.first['url']).timeout(const Duration(seconds: 4));
+            _player.play();
+            setState(() {
+              _isBuffering = false;
+              _statusMessage = "Toca aquí para ver la Letra 🎤";
+            });
+            return;
           }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
     setState(() {
       _isBuffering = false;
-      _statusMessage = "Prueba la siguiente pista de la lista";
+      _statusMessage = "Reintenta tocando otra pista";
     });
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Este video tiene restricción, toca la versión de abajo.")),
-      );
-    }
   }
 
   // Buscador de Letras Limpio
