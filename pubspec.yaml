@@ -1,4 +1,4 @@
-name: Aura
+name: aura_music
 description: Reproductor de musica Open Source sin anuncios.
 publish_to: 'none'
 version: 1.2.0+3
