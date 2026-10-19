@@ -137,7 +137,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     }
   }
 
-  // Buscador de Catálogo (Sin usar previews de 30s)
+  // Buscador Ultra Rápido
   Future<void> _searchMusic(String query) async {
     if (query.trim().isEmpty) return;
     setState(() {
@@ -147,9 +147,8 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
 
     List<TrackItem> foundTracks = [];
 
-    // 1. Buscamos primero en YouTube directo para tener el VideoID real desde el segundo 0
     try {
-      final ytResults = await _yt.search.search("$query audio").timeout(const Duration(seconds: 7));
+      final ytResults = await _yt.search.search("$query audio").timeout(const Duration(seconds: 4));
       for (var v in ytResults) {
         foundTracks.add(TrackItem(
           id: v.id.value,
@@ -160,12 +159,11 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
       }
     } catch (_) {}
 
-    // 2. Si la búsqueda de YouTube falló, traemos catálogo limpio de iTunes (SOLO nombres y portadas, CERO audio de 30s)
     if (foundTracks.isEmpty) {
       try {
         final itunesUrl = Uri.parse(
             'https://itunes.apple.com/search?term=${Uri.encodeComponent(query)}&entity=song&limit=25');
-        final res = await http.get(itunesUrl).timeout(const Duration(seconds: 5));
+        final res = await http.get(itunesUrl).timeout(const Duration(seconds: 3));
         if (res.statusCode == 200) {
           final data = json.decode(res.body);
           final List results = data['results'] ?? [];
@@ -188,12 +186,12 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     });
   }
 
-  // MOTOR 100% PISTA COMPLETA (Prohibidas las muestras de 30 segundos)
+  // MOTOR OPTIMIZADO: Carga rápida de Pista Completa (Menos de 2 segundos)
   Future<void> _playTrack(TrackItem track) async {
     setState(() {
       _currentTrack = track;
       _isBuffering = true;
-      _statusMessage = "Obteniendo pista completa...";
+      _statusMessage = "Reproduciendo al instante...";
       _currentLyrics = "Cargando letra de ${track.title}...";
     });
 
@@ -204,145 +202,77 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
         .trim();
     final cleanArtist = track.artist.replaceAll(' - Topic', '').split('&').first.trim();
 
-    // MOTOR 1: Servidores de Streaming Directo 320kbps (JioSaavn API - Pistas completas instantáneas sin bloqueo de YouTube)
-    final saavnApis = [
-      "https://saavn.dev/api/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
-      "https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
-    ];
-
-    for (final apiUrl in saavnApis) {
-      try {
-        final res = await http.get(Uri.parse(apiUrl)).timeout(const Duration(seconds: 5));
-        if (res.statusCode == 200) {
-          final body = json.decode(res.body);
-          final List results = body['data']?['results'] ?? [];
-          if (results.isNotEmpty) {
-            final List downloadUrls = results[0]['downloadUrl'] ?? [];
-            if (downloadUrls.isNotEmpty) {
-              // Tomamos la calidad más alta (320kbps o 160kbps completa)
-              final String bestUrl = downloadUrls.last['url'] ?? downloadUrls.last['link'] ?? "";
-              if (bestUrl.isNotEmpty) {
-                await _player.setUrl(bestUrl);
-                _player.play();
-                setState(() {
-                  _isBuffering = false;
-                  _statusMessage = "Toca aquí para ver la Letra 🎤";
-                });
-                return;
-              }
-            }
-          }
-        }
-      } catch (_) {}
-    }
-
-    // MOTOR 2: YouTube Stream Completo (Probando Muxed + AudioOnly con múltiples clientes)
+    // ORDEN VELOZ 1: Extracción directa por ID de YouTube (Muy Rápido)
     try {
       String videoId = track.id;
       if (videoId.isEmpty || RegExp(r'^[0-9]+$').hasMatch(videoId)) {
         final searchList = await _yt.search
             .search("$cleanTitle $cleanArtist audio")
-            .timeout(const Duration(seconds: 6));
+            .timeout(const Duration(seconds: 3));
         if (searchList.isNotEmpty) {
           videoId = searchList.first.id.value;
         }
       }
 
       if (videoId.isNotEmpty) {
-        // Probamos clientes uno por uno hasta que uno entregue el stream completo y reproduzca
-        final clientSets = [
-          [YoutubeApiClient.androidVr],
-          [YoutubeApiClient.safari],
-          [YoutubeApiClient.ios],
-          [YoutubeApiClient.android],
-        ];
+        final manifest = await _yt.videos.streamsClient
+            .getManifest(videoId, ytClients: [YoutubeApiClient.androidVr, YoutubeApiClient.safari])
+            .timeout(const Duration(seconds: 4));
 
-        for (final clientList in clientSets) {
-          try {
-            final manifest = await _yt.videos.streamsClient
-                .getManifest(videoId, ytClients: clientList)
-                .timeout(const Duration(seconds: 6));
-
-            // Recolectamos tanto streams de solo audio como muxed (los muxed casi nunca tienen bloqueo 403 en Android)
-            final List< Uri > candidateUrls = [];
-
-            final muxedList = manifest.muxed.toList();
-            if (muxedList.isNotEmpty) {
-              candidateUrls.add(muxedList.withHighestBitrate().url);
-            }
-
-            final audioMp4 = manifest.audioOnly.where((s) => s.container.name == 'mp4').toList();
-            if (audioMp4.isNotEmpty) {
-              candidateUrls.add(audioMp4.withHighestBitrate().url);
-            }
-
-            if (manifest.audioOnly.isNotEmpty) {
-              candidateUrls.add(manifest.audioOnly.withHighestBitrate().url);
-            }
-
-            for (final uri in candidateUrls) {
-              try {
-                await _player.setUrl(uri.toString()).timeout(const Duration(seconds: 6));
-                _player.play();
-                setState(() {
-                  _isBuffering = false;
-                  _statusMessage = "Toca aquí para ver la Letra 🎤";
-                });
-                return;
-              } catch (_) {
-                // Si este enlace dio error en el reproductor, prueba el siguiente candidato
-              }
-            }
-          } catch (_) {}
+        final audioMp4 = manifest.audioOnly.where((s) => s.container.name == 'mp4').toList();
+        if (audioMp4.isNotEmpty) {
+          audioMp4.sort((a, b) => b.bitrate.compareTo(a.bitrate));
+          await _player.setUrl(audioMp4.first.url.toString());
+          _player.play();
+          setState(() {
+            _isBuffering = false;
+            _statusMessage = "Toca aquí para ver la Letra 🎤";
+          });
+          return;
+        } else if (manifest.audioOnly.isNotEmpty) {
+          await _player.setUrl(manifest.audioOnly.withHighestBitrate().url.toString());
+          _player.play();
+          setState(() {
+            _isBuffering = false;
+            _statusMessage = "Toca aquí para ver la Letra 🎤";
+          });
+          return;
         }
       }
     } catch (_) {}
 
-    // MOTOR 3: Servidores Espejo Piped / Invidious (Canciones completas de respaldo)
-    final pipedServers = [
-      "https://pipedapi.kavin.rocks",
-      "https://api.piped.private.coffee",
-      "https://pipedapi.drgns.space",
-    ];
-
-    for (final server in pipedServers) {
-      try {
-        final sRes = await http
-            .get(Uri.parse("$server/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}&filter=music_songs"))
-            .timeout(const Duration(seconds: 5));
-        if (sRes.statusCode == 200) {
-          final sData = json.decode(sRes.body);
-          final List items = sData['items'] ?? [];
-          if (items.isNotEmpty) {
-            final vidId = (items[0]['url'] as String).replaceAll('/watch?v=', '');
-            final stRes = await http.get(Uri.parse("$server/streams/$vidId")).timeout(const Duration(seconds: 5));
-            if (stRes.statusCode == 200) {
-              final stData = json.decode(stRes.body);
-              final List aStreams = stData['audioStreams'] ?? [];
-              if (aStreams.isNotEmpty) {
-                await _player.setUrl(aStreams[0]['url']);
-                _player.play();
-                setState(() {
-                  _isBuffering = false;
-                  _statusMessage = "Toca aquí para ver la Letra 🎤";
-                });
-                return;
-              }
+    // ORDEN VELOZ 2: Respaldo inmediato por Piped API
+    try {
+      final sRes = await http
+          .get(Uri.parse("https://pipedapi.kavin.rocks/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}&filter=music_songs"))
+          .timeout(const Duration(seconds: 3));
+      if (sRes.statusCode == 200) {
+        final sData = json.decode(sRes.body);
+        final List items = sData['items'] ?? [];
+        if (items.isNotEmpty) {
+          final vidId = (items[0]['url'] as String).replaceAll('/watch?v=', '');
+          final stRes = await http.get(Uri.parse("https://pipedapi.kavin.rocks/streams/$vidId")).timeout(const Duration(seconds: 3));
+          if (stRes.statusCode == 200) {
+            final stData = json.decode(stRes.body);
+            final List aStreams = stData['audioStreams'] ?? [];
+            if (aStreams.isNotEmpty) {
+              await _player.setUrl(aStreams[0]['url']);
+              _player.play();
+              setState(() {
+                _isBuffering = false;
+                _statusMessage = "Toca aquí para ver la Letra 🎤";
+              });
+              return;
             }
           }
         }
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
 
     setState(() {
       _isBuffering = false;
-      _statusMessage = "Toca otra versión de la canción";
+      _statusMessage = "Toca otra versión si no suena";
     });
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("YouTube bloqueó esta pista, intenta tocar la siguiente versión en la lista.")),
-      );
-    }
   }
 
   // Buscador de Letras
@@ -361,24 +291,11 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     try {
       final url = Uri.parse(
           'https://lrclib.net/api/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}');
-      final response = await http.get(url).timeout(const Duration(seconds: 5));
+      final response = await http.get(url).timeout(const Duration(seconds: 4));
       if (response.statusCode == 200) {
         final List data = json.decode(utf8.decode(response.bodyBytes));
         if (data.isNotEmpty && data[0]['plainLyrics'] != null) {
           setState(() => _currentLyrics = data[0]['plainLyrics']);
-          return;
-        }
-      }
-    } catch (_) {}
-
-    try {
-      final url2 = Uri.parse(
-          'https://api.lyrics.ovh/v1/${Uri.encodeComponent(cleanArtist)}/${Uri.encodeComponent(cleanTitle)}');
-      final response2 = await http.get(url2).timeout(const Duration(seconds: 5));
-      if (response2.statusCode == 200) {
-        final data2 = json.decode(utf8.decode(response2.bodyBytes));
-        if (data2['lyrics'] != null && data2['lyrics'].toString().isNotEmpty) {
-          setState(() => _currentLyrics = data2['lyrics']);
           return;
         }
       }
@@ -410,11 +327,11 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF1A1825),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text("Importar música o Playlist"),
+        title: const Text("Importar música"),
         content: TextField(
           controller: linkController,
           decoration: const InputDecoration(
-            hintText: "Escribe el nombre de tu playlist o artista...",
+            hintText: "Escribe artista o pega enlace...",
           ),
         ),
         actions: [
@@ -431,7 +348,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
                 _searchMusic(text);
               }
             },
-            child: const Text("Buscar ahora"),
+            child: const Text("Buscar"),
           ),
         ],
       ),
@@ -766,7 +683,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
                                   SizedBox(width: 10),
                                   Expanded(
                                     child: Text(
-                                      "Toca aquí para pegar enlace o buscar lista",
+                                      "Toca aquí para importar música",
                                       style: TextStyle(color: Colors.white70, fontSize: 13),
                                     ),
                                   ),
