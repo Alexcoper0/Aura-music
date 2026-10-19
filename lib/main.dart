@@ -16,14 +16,12 @@ class TrackItem {
   final String title;
   final String artist;
   final String thumb;
-  final String? previewUrl;
 
   TrackItem({
     required this.id,
     required this.title,
     required this.artist,
     required this.thumb,
-    this.previewUrl,
   });
 
   Map<String, dynamic> toJson() => {
@@ -31,7 +29,6 @@ class TrackItem {
         'title': title,
         'artist': artist,
         'thumb': thumb,
-        'previewUrl': previewUrl,
       };
 
   factory TrackItem.fromJson(Map<String, dynamic> json) => TrackItem(
@@ -39,7 +36,6 @@ class TrackItem {
         title: json['title'] ?? '',
         artist: json['artist'] ?? '',
         thumb: json['thumb'] ?? '',
-        previewUrl: json['previewUrl'],
       );
 }
 
@@ -80,10 +76,11 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
   List<TrackItem> _favorites = [];
   bool _isLoading = false;
   bool _isBuffering = false;
+  String _statusMessage = "Toca aquí para ver la Letra 🎤";
 
   TrackItem _currentTrack = TrackItem(
     id: 'demo',
-    title: "Toca cualquier canción para sonar",
+    title: "Selecciona una canción",
     artist: "Aura Music",
     thumb: "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=300",
   );
@@ -95,16 +92,14 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     super.initState();
     _loadSavedFavorites();
 
-    // Escuchar estados del reproductor para que el botón Play/Pausa nunca se quede pegado
     _player.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
-        _playNextTrack(); // Pasa a la siguiente canción automáticamente al terminar
+        _playNextTrack();
       }
       if (mounted) setState(() {});
     });
   }
 
-  // Cargar Favoritos guardados en la memoria del celular
   Future<void> _loadSavedFavorites() async {
     final prefs = await SharedPreferences.getInstance();
     final List<String> saved = prefs.getStringList('aura_favs') ?? [];
@@ -119,7 +114,6 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     await prefs.setStringList('aura_favs', encoded);
   }
 
-  // Pasar a la siguiente canción de la lista automáticamente
   void _playNextTrack() {
     final list = _selectedTab == 2 ? _favorites : _searchResults;
     if (list.isEmpty) return;
@@ -143,7 +137,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     }
   }
 
-  // Buscador de Catálogo HD
+  // Buscador de Catálogo (Sin usar previews de 30s)
   Future<void> _searchMusic(String query) async {
     if (query.trim().isEmpty) return;
     setState(() {
@@ -153,37 +147,38 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
 
     List<TrackItem> foundTracks = [];
 
+    // 1. Buscamos primero en YouTube directo para tener el VideoID real desde el segundo 0
     try {
-      final itunesUrl = Uri.parse(
-          'https://itunes.apple.com/search?term=${Uri.encodeComponent(query)}&entity=song&limit=25');
-      final res = await http.get(itunesUrl).timeout(const Duration(seconds: 5));
-      if (res.statusCode == 200) {
-        final data = json.decode(res.body);
-        final List results = data['results'] ?? [];
-        for (var item in results) {
-          foundTracks.add(TrackItem(
-            id: item['trackId'].toString(),
-            title: item['trackName'] ?? "Canción",
-            artist: item['artistName'] ?? "Artista",
-            thumb: (item['artworkUrl100'] as String? ?? "")
-                .replaceAll('100x100bb', '600x600bb'),
-            previewUrl: item['previewUrl'],
-          ));
-        }
+      final ytResults = await _yt.search.search("$query audio").timeout(const Duration(seconds: 7));
+      for (var v in ytResults) {
+        foundTracks.add(TrackItem(
+          id: v.id.value,
+          title: v.title,
+          artist: v.author.replaceAll(' - Topic', ''),
+          thumb: v.thumbnails.highResUrl,
+        ));
       }
     } catch (_) {}
 
+    // 2. Si la búsqueda de YouTube falló, traemos catálogo limpio de iTunes (SOLO nombres y portadas, CERO audio de 30s)
     if (foundTracks.isEmpty) {
       try {
-        final results = await _yt.search.search(query);
-        foundTracks = results
-            .map((v) => TrackItem(
-                  id: v.id.value,
-                  title: v.title,
-                  artist: v.author,
-                  thumb: v.thumbnails.highResUrl,
-                ))
-            .toList();
+        final itunesUrl = Uri.parse(
+            'https://itunes.apple.com/search?term=${Uri.encodeComponent(query)}&entity=song&limit=25');
+        final res = await http.get(itunesUrl).timeout(const Duration(seconds: 5));
+        if (res.statusCode == 200) {
+          final data = json.decode(res.body);
+          final List results = data['results'] ?? [];
+          for (var item in results) {
+            foundTracks.add(TrackItem(
+              id: '',
+              title: item['trackName'] ?? "Canción",
+              artist: item['artistName'] ?? "Artista",
+              thumb: (item['artworkUrl100'] as String? ?? "")
+                  .replaceAll('100x100bb', '600x600bb'),
+            ));
+          }
+        }
       } catch (_) {}
     }
 
@@ -193,73 +188,47 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     });
   }
 
-  // Motor Directo de Pista Completa (Rápido y en formato M4A nativo para Android)
+  // MOTOR 100% PISTA COMPLETA (Prohibidas las muestras de 30 segundos)
   Future<void> _playTrack(TrackItem track) async {
     setState(() {
       _currentTrack = track;
       _isBuffering = true;
+      _statusMessage = "Obteniendo pista completa...";
       _currentLyrics = "Cargando letra de ${track.title}...";
     });
 
     _fetchLyrics(track.title, track.artist);
 
-    String? fullAudioUrl;
+    final cleanTitle = track.title
+        .replaceAll(RegExp(r'\(.*?\)|\[.*?\]|Official|Audio|Video|Lyrics', caseSensitive: false), '')
+        .trim();
+    final cleanArtist = track.artist.replaceAll(' - Topic', '').split('&').first.trim();
 
-    // 1. Buscamos la pista completa en YouTube usando el nuevo motor 2.5.3
-    try {
-      String videoId = track.id;
-      // Si el ID es de catálogo (solo números), buscamos el video oficial de audio
-      if (RegExp(r'^[0-9]+$').hasMatch(track.id)) {
-        final searchList = await _yt.search
-            .search("${track.title} ${track.artist} official audio")
-            .timeout(const Duration(seconds: 4));
-        if (searchList.isNotEmpty) {
-          videoId = searchList.first.id.value;
-        }
-      }
+    // MOTOR 1: Servidores de Streaming Directo 320kbps (JioSaavn API - Pistas completas instantáneas sin bloqueo de YouTube)
+    final saavnApis = [
+      "https://saavn.dev/api/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
+      "https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
+    ];
 
-      // Pedimos el stream usando clientes que no tienen bloqueo ni espera
-      final manifest = await _yt.videos.streamsClient.getManifest(
-        videoId,
-        ytClients: [
-          YoutubeApiClient.ios,
-          YoutubeApiClient.androidVr,
-          YoutubeApiClient.safari,
-        ],
-      ).timeout(const Duration(seconds: 5));
-
-      // Preferimos contenedor mp4/m4a para que Android reproduzca la canción entera sin cortarse
-      final mp4Streams = manifest.audioOnly.where((s) => s.container.name == 'mp4').toList();
-      if (mp4Streams.isNotEmpty) {
-        mp4Streams.sort((a, b) => b.bitrate.compareTo(a.bitrate));
-        fullAudioUrl = mp4Streams.first.url.toString();
-      } else if (manifest.audioOnly.isNotEmpty) {
-        fullAudioUrl = manifest.audioOnly.withHighestBitrate().url.toString();
-      }
-    } catch (_) {}
-
-    // 2. Respaldo rápido por API espejo (Invidious/Piped) si YouTube restringe por país/edad
-    if (fullAudioUrl == null) {
+    for (final apiUrl in saavnApis) {
       try {
-        final q = Uri.encodeComponent("${track.title} ${track.artist} audio");
-        final res = await http
-            .get(Uri.parse("https://inv.nadeko.net/api/v1/search?q=$q&type=video"))
-            .timeout(const Duration(seconds: 4));
+        final res = await http.get(Uri.parse(apiUrl)).timeout(const Duration(seconds: 5));
         if (res.statusCode == 200) {
-          final List list = json.decode(res.body);
-          if (list.isNotEmpty) {
-            final vid = list[0]['videoId'];
-            final vRes = await http
-                .get(Uri.parse("https://inv.nadeko.net/api/v1/videos/$vid"))
-                .timeout(const Duration(seconds: 4));
-            if (vRes.statusCode == 200) {
-              final vData = json.decode(vRes.body);
-              final List formats = vData['adaptiveFormats'] ?? [];
-              final audioFormats = formats
-                  .where((f) => (f['type'] as String? ?? '').startsWith('audio/mp4'))
-                  .toList();
-              if (audioFormats.isNotEmpty) {
-                fullAudioUrl = audioFormats.first['url'];
+          final body = json.decode(res.body);
+          final List results = body['data']?['results'] ?? [];
+          if (results.isNotEmpty) {
+            final List downloadUrls = results[0]['downloadUrl'] ?? [];
+            if (downloadUrls.isNotEmpty) {
+              // Tomamos la calidad más alta (320kbps o 160kbps completa)
+              final String bestUrl = downloadUrls.last['url'] ?? downloadUrls.last['link'] ?? "";
+              if (bestUrl.isNotEmpty) {
+                await _player.setUrl(bestUrl);
+                _player.play();
+                setState(() {
+                  _isBuffering = false;
+                  _statusMessage = "Toca aquí para ver la Letra 🎤";
+                });
+                return;
               }
             }
           }
@@ -267,21 +236,112 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
       } catch (_) {}
     }
 
-    // 3. Reproducir pista completa (y solo si falla el internet, usar el preview de respaldo)
+    // MOTOR 2: YouTube Stream Completo (Probando Muxed + AudioOnly con múltiples clientes)
     try {
-      if (fullAudioUrl != null) {
-        await _player.setUrl(fullAudioUrl);
-      } else if (track.previewUrl != null) {
-        await _player.setUrl(track.previewUrl!);
+      String videoId = track.id;
+      if (videoId.isEmpty || RegExp(r'^[0-9]+$').hasMatch(videoId)) {
+        final searchList = await _yt.search
+            .search("$cleanTitle $cleanArtist audio")
+            .timeout(const Duration(seconds: 6));
+        if (searchList.isNotEmpty) {
+          videoId = searchList.first.id.value;
+        }
       }
-      _player.play();
-      setState(() => _isBuffering = false);
-    } catch (_) {
-      if (track.previewUrl != null) {
-        await _player.setUrl(track.previewUrl!);
-        _player.play();
+
+      if (videoId.isNotEmpty) {
+        // Probamos clientes uno por uno hasta que uno entregue el stream completo y reproduzca
+        final clientSets = [
+          [YoutubeApiClient.androidVr],
+          [YoutubeApiClient.safari],
+          [YoutubeApiClient.ios],
+          [YoutubeApiClient.android],
+        ];
+
+        for (final clientList in clientSets) {
+          try {
+            final manifest = await _yt.videos.streamsClient
+                .getManifest(videoId, ytClients: clientList)
+                .timeout(const Duration(seconds: 6));
+
+            // Recolectamos tanto streams de solo audio como muxed (los muxed casi nunca tienen bloqueo 403 en Android)
+            final List< Uri > candidateUrls = [];
+
+            final muxedList = manifest.muxed.toList();
+            if (muxedList.isNotEmpty) {
+              candidateUrls.add(muxedList.withHighestBitrate().url);
+            }
+
+            final audioMp4 = manifest.audioOnly.where((s) => s.container.name == 'mp4').toList();
+            if (audioMp4.isNotEmpty) {
+              candidateUrls.add(audioMp4.withHighestBitrate().url);
+            }
+
+            if (manifest.audioOnly.isNotEmpty) {
+              candidateUrls.add(manifest.audioOnly.withHighestBitrate().url);
+            }
+
+            for (final uri in candidateUrls) {
+              try {
+                await _player.setUrl(uri.toString()).timeout(const Duration(seconds: 6));
+                _player.play();
+                setState(() {
+                  _isBuffering = false;
+                  _statusMessage = "Toca aquí para ver la Letra 🎤";
+                });
+                return;
+              } catch (_) {
+                // Si este enlace dio error en el reproductor, prueba el siguiente candidato
+              }
+            }
+          } catch (_) {}
+        }
       }
-      setState(() => _isBuffering = false);
+    } catch (_) {}
+
+    // MOTOR 3: Servidores Espejo Piped / Invidious (Canciones completas de respaldo)
+    final pipedServers = [
+      "https://pipedapi.kavin.rocks",
+      "https://api.piped.private.coffee",
+      "https://pipedapi.drgns.space",
+    ];
+
+    for (final server in pipedServers) {
+      try {
+        final sRes = await http
+            .get(Uri.parse("$server/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}&filter=music_songs"))
+            .timeout(const Duration(seconds: 5));
+        if (sRes.statusCode == 200) {
+          final sData = json.decode(sRes.body);
+          final List items = sData['items'] ?? [];
+          if (items.isNotEmpty) {
+            final vidId = (items[0]['url'] as String).replaceAll('/watch?v=', '');
+            final stRes = await http.get(Uri.parse("$server/streams/$vidId")).timeout(const Duration(seconds: 5));
+            if (stRes.statusCode == 200) {
+              final stData = json.decode(stRes.body);
+              final List aStreams = stData['audioStreams'] ?? [];
+              if (aStreams.isNotEmpty) {
+                await _player.setUrl(aStreams[0]['url']);
+                _player.play();
+                setState(() {
+                  _isBuffering = false;
+                  _statusMessage = "Toca aquí para ver la Letra 🎤";
+                });
+                return;
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    setState(() {
+      _isBuffering = false;
+      _statusMessage = "Toca otra versión de la canción";
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("YouTube bloqueó esta pista, intenta tocar la siguiente versión en la lista.")),
+      );
     }
   }
 
@@ -296,7 +356,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
         .first
         .trim();
 
-    final cleanArtist = rawArtist.replaceAll(' - Topic', '').split('&').first.trim();
+    final cleanArtist = rawArtist.replaceAll(' - Topic', '').split('&').first.split(',').first.trim();
 
     try {
       final url = Uri.parse(
@@ -329,9 +389,9 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
 
   void _toggleFavorite(TrackItem track) {
     setState(() {
-      final exists = _favorites.any((t) => t.id == track.id);
+      final exists = _favorites.any((t) => t.title == track.title && t.artist == track.artist);
       if (exists) {
-        _favorites.removeWhere((t) => t.id == track.id);
+        _favorites.removeWhere((t) => t.title == track.title && t.artist == track.artist);
       } else {
         _favorites.add(track);
       }
@@ -340,7 +400,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
   }
 
   bool _isFavorite(TrackItem track) {
-    return _favorites.any((t) => t.id == track.id);
+    return _favorites.any((t) => t.title == track.title && t.artist == track.artist);
   }
 
   void _showImportDialog() {
@@ -378,7 +438,6 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     );
   }
 
-  // Pantalla Completa del Reproductor + Controles Anterior/Siguiente
   void _openFullPlayer() {
     showModalBottomSheet(
       context: context,
@@ -428,7 +487,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
                           Text(
                             _currentTrack.title,
                             textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+                            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                           ),
                           const SizedBox(height: 6),
                           Text(
@@ -791,7 +850,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    _isBuffering ? "Cargando canción completa..." : "Toca aquí para ver la Letra 🎤",
+                                    _statusMessage,
                                     style: TextStyle(fontSize: 11, color: Colors.purpleAccent.shade100),
                                   ),
                                   Text(
