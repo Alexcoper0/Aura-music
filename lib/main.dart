@@ -137,7 +137,6 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     }
   }
 
-  // Buscador Ultra Rápido
   Future<void> _searchMusic(String query) async {
     if (query.trim().isEmpty) return;
     setState(() {
@@ -148,7 +147,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     List<TrackItem> foundTracks = [];
 
     try {
-      final ytResults = await _yt.search.search("$query audio").timeout(const Duration(seconds: 4));
+      final ytResults = await _yt.search.search("$query audio").timeout(const Duration(seconds: 5));
       for (var v in ytResults) {
         foundTracks.add(TrackItem(
           id: v.id.value,
@@ -159,39 +158,18 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
       }
     } catch (_) {}
 
-    if (foundTracks.isEmpty) {
-      try {
-        final itunesUrl = Uri.parse(
-            'https://itunes.apple.com/search?term=${Uri.encodeComponent(query)}&entity=song&limit=25');
-        final res = await http.get(itunesUrl).timeout(const Duration(seconds: 3));
-        if (res.statusCode == 200) {
-          final data = json.decode(res.body);
-          final List results = data['results'] ?? [];
-          for (var item in results) {
-            foundTracks.add(TrackItem(
-              id: '',
-              title: item['trackName'] ?? "Canción",
-              artist: item['artistName'] ?? "Artista",
-              thumb: (item['artworkUrl100'] as String? ?? "")
-                  .replaceAll('100x100bb', '600x600bb'),
-            ));
-          }
-        }
-      } catch (_) {}
-    }
-
     setState(() {
       _searchResults = foundTracks;
       _isLoading = false;
     });
   }
 
-  // MOTOR OPTIMIZADO: Carga rápida de Pista Completa (Menos de 2 segundos)
+  // MOTOR BLINDADO DE STREAMING GLOBAL (Piped + Invidious + YouTube Directo)
   Future<void> _playTrack(TrackItem track) async {
     setState(() {
       _currentTrack = track;
       _isBuffering = true;
-      _statusMessage = "Reproduciendo al instante...";
+      _statusMessage = "Conectando stream...";
       _currentLyrics = "Cargando letra de ${track.title}...";
     });
 
@@ -202,77 +180,105 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
         .trim();
     final cleanArtist = track.artist.replaceAll(' - Topic', '').split('&').first.trim();
 
-    // ORDEN VELOZ 1: Extracción directa por ID de YouTube (Muy Rápido)
-    try {
-      String videoId = track.id;
-      if (videoId.isEmpty || RegExp(r'^[0-9]+$').hasMatch(videoId)) {
-        final searchList = await _yt.search
-            .search("$cleanTitle $cleanArtist audio")
-            .timeout(const Duration(seconds: 3));
-        if (searchList.isNotEmpty) {
-          videoId = searchList.first.id.value;
-        }
-      }
+    String? audioStreamUrl;
 
-      if (videoId.isNotEmpty) {
-        final manifest = await _yt.videos.streamsClient
-            .getManifest(videoId, ytClients: [YoutubeApiClient.androidVr, YoutubeApiClient.safari])
+    // INTENTO 1: Servidor Global Piped (El más rápido y estable del mundo open-source)
+    const pipedInstances = [
+      "https://pipedapi.kavin.rocks",
+      "https://api.piped.projectsegfau.lt",
+      "https://pipedapi.drgns.space",
+    ];
+
+    for (final instance in pipedInstances) {
+      try {
+        final searchRes = await http
+            .get(Uri.parse("$instance/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}&filter=music_songs"))
             .timeout(const Duration(seconds: 4));
-
-        final audioMp4 = manifest.audioOnly.where((s) => s.container.name == 'mp4').toList();
-        if (audioMp4.isNotEmpty) {
-          audioMp4.sort((a, b) => b.bitrate.compareTo(a.bitrate));
-          await _player.setUrl(audioMp4.first.url.toString());
-          _player.play();
-          setState(() {
-            _isBuffering = false;
-            _statusMessage = "Toca aquí para ver la Letra 🎤";
-          });
-          return;
-        } else if (manifest.audioOnly.isNotEmpty) {
-          await _player.setUrl(manifest.audioOnly.withHighestBitrate().url.toString());
-          _player.play();
-          setState(() {
-            _isBuffering = false;
-            _statusMessage = "Toca aquí para ver la Letra 🎤";
-          });
-          return;
-        }
-      }
-    } catch (_) {}
-
-    // ORDEN VELOZ 2: Respaldo inmediato por Piped API
-    try {
-      final sRes = await http
-          .get(Uri.parse("https://pipedapi.kavin.rocks/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}&filter=music_songs"))
-          .timeout(const Duration(seconds: 3));
-      if (sRes.statusCode == 200) {
-        final sData = json.decode(sRes.body);
-        final List items = sData['items'] ?? [];
-        if (items.isNotEmpty) {
-          final vidId = (items[0]['url'] as String).replaceAll('/watch?v=', '');
-          final stRes = await http.get(Uri.parse("https://pipedapi.kavin.rocks/streams/$vidId")).timeout(const Duration(seconds: 3));
-          if (stRes.statusCode == 200) {
-            final stData = json.decode(stRes.body);
-            final List aStreams = stData['audioStreams'] ?? [];
-            if (aStreams.isNotEmpty) {
-              await _player.setUrl(aStreams[0]['url']);
-              _player.play();
-              setState(() {
-                _isBuffering = false;
-                _statusMessage = "Toca aquí para ver la Letra 🎤";
-              });
-              return;
+        if (searchRes.statusCode == 200) {
+          final data = json.decode(searchRes.body);
+          final List items = data['items'] ?? [];
+          if (items.isNotEmpty) {
+            final vidId = (items[0]['url'] as String).replaceAll('/watch?v=', '');
+            final streamRes = await http.get(Uri.parse("$instance/streams/$vidId")).timeout(const Duration(seconds: 4));
+            if (streamRes.statusCode == 200) {
+              final streamData = json.decode(streamRes.body);
+              final List audioStreams = streamData['audioStreams'] ?? [];
+              if (audioStreams.isNotEmpty) {
+                audioStreamUrl = audioStreams[0]['url'];
+                break;
+              }
             }
           }
         }
+      } catch (_) {}
+    }
+
+    // INTENTO 2: Servidores Invidious de Respaldo
+    if (audioStreamUrl == null) {
+      const invidiousInstances = [
+        "https://inv.nadeko.net",
+        "https://invidious.perennialte.ch",
+      ];
+
+      for (final instance in invidiousInstances) {
+        try {
+          final sRes = await http
+              .get(Uri.parse("$instance/api/v1/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}&type=video"))
+              .timeout(const Duration(seconds: 4));
+          if (sRes.statusCode == 200) {
+            final List list = json.decode(sRes.body);
+            if (list.isNotEmpty) {
+              final vid = list[0]['videoId'];
+              final vRes = await http.get(Uri.parse("$instance/api/v1/videos/$vid")).timeout(const Duration(seconds: 4));
+              if (vRes.statusCode == 200) {
+                final vData = json.decode(vRes.body);
+                final List formats = vData['adaptiveFormats'] ?? [];
+                final audioF = formats.where((f) => (f['type'] as String? ?? '').startsWith('audio/')).toList();
+                if (audioF.isNotEmpty) {
+                  audioStreamUrl = audioF[0]['url'];
+                  break;
+                }
+              }
+            }
+          }
+        } catch (_) {}
       }
-    } catch (_) {}
+    }
+
+    // INTENTO 3: YouTube Explode Directo con cliente Android
+    if (audioStreamUrl == null && track.id.isNotEmpty) {
+      try {
+        final manifest = await _yt.videos.streamsClient
+            .getManifest(track.id, ytClients: [YoutubeApiClient.android, YoutubeApiClient.safari])
+            .timeout(const Duration(seconds: 4));
+        if (manifest.audioOnly.isNotEmpty) {
+          audioStreamUrl = manifest.audioOnly.withHighestBitrate().url.toString();
+        }
+      } catch (_) {}
+    }
+
+    // Reproducción final garantizada
+    if (audioStreamUrl != null) {
+      try {
+        await _player.setUrl(audioStreamUrl);
+        _player.play();
+        setState(() {
+          _isBuffering = false;
+          _statusMessage = "Toca aquí para ver la Letra 🎤";
+        });
+        return;
+      } catch (_) {}
+    }
 
     setState(() {
       _isBuffering = false;
       _statusMessage = "Toca otra versión si no suena";
     });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("No se pudo conectar con este servidor, prueba con otra pista.")),
+      );
+    }
   }
 
   // Buscador de Letras
