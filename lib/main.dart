@@ -5,6 +5,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const AuraApp());
@@ -15,15 +16,31 @@ class TrackItem {
   final String title;
   final String artist;
   final String thumb;
-  final String? directAudioUrl;
+  final String? previewUrl;
 
   TrackItem({
     required this.id,
     required this.title,
     required this.artist,
     required this.thumb,
-    this.directAudioUrl,
+    this.previewUrl,
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'artist': artist,
+        'thumb': thumb,
+        'previewUrl': previewUrl,
+      };
+
+  factory TrackItem.fromJson(Map<String, dynamic> json) => TrackItem(
+        id: json['id'] ?? '',
+        title: json['title'] ?? '',
+        artist: json['artist'] ?? '',
+        thumb: json['thumb'] ?? '',
+        previewUrl: json['previewUrl'],
+      );
 }
 
 class AuraApp extends StatelessWidget {
@@ -58,9 +75,9 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
   final YoutubeExplode _yt = YoutubeExplode();
   final TextEditingController _searchController = TextEditingController();
 
-  int _selectedTab = 0; // 0: Inicio, 1: Buscar, 2: Mi Biblioteca
+  int _selectedTab = 0;
   List<TrackItem> _searchResults = [];
-  final List<TrackItem> _favorites = [];
+  List<TrackItem> _favorites = [];
   bool _isLoading = false;
   bool _isBuffering = false;
 
@@ -73,23 +90,60 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
 
   String _currentLyrics = "Reproduce una canción y desliza hacia arriba para ver la letra aquí.";
 
-  // Lista de servidores espejo (Piped) para evitar el bloqueo de YouTube (RequestLimitExceeded)
-  final List<String> _pipedInstances = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.tokhmi.xyz",
-    "https://pipedapi.syncpundit.io",
-    "https://api.piped.projectsegfau.lt",
-  ];
-
   @override
   void initState() {
     super.initState();
+    _loadSavedFavorites();
+
+    // Escuchar estados del reproductor para que el botón Play/Pausa nunca se quede pegado
     _player.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.completed) {
+        _playNextTrack(); // Pasa a la siguiente canción automáticamente al terminar
+      }
       if (mounted) setState(() {});
     });
   }
 
-  // Buscador Híbrido: Trae metadatos limpios de música + IDs de YouTube
+  // Cargar Favoritos guardados en la memoria del celular
+  Future<void> _loadSavedFavorites() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> saved = prefs.getStringList('aura_favs') ?? [];
+    setState(() {
+      _favorites = saved.map((e) => TrackItem.fromJson(json.decode(e))).toList();
+    });
+  }
+
+  Future<void> _saveFavoritesToDisk() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> encoded = _favorites.map((e) => json.encode(e.toJson())).toList();
+    await prefs.setStringList('aura_favs', encoded);
+  }
+
+  // Pasar a la siguiente canción de la lista automáticamente
+  void _playNextTrack() {
+    final list = _selectedTab == 2 ? _favorites : _searchResults;
+    if (list.isEmpty) return;
+    final idx = list.indexWhere((t) => t.title == _currentTrack.title && t.artist == _currentTrack.artist);
+    if (idx != -1 && idx + 1 < list.length) {
+      _playTrack(list[idx + 1]);
+    } else {
+      _player.seek(Duration.zero);
+      _player.pause();
+    }
+  }
+
+  void _playPrevTrack() {
+    final list = _selectedTab == 2 ? _favorites : _searchResults;
+    if (list.isEmpty) return;
+    final idx = list.indexWhere((t) => t.title == _currentTrack.title && t.artist == _currentTrack.artist);
+    if (idx > 0) {
+      _playTrack(list[idx - 1]);
+    } else {
+      _player.seek(Duration.zero);
+    }
+  }
+
+  // Buscador de Catálogo HD
   Future<void> _searchMusic(String query) async {
     if (query.trim().isEmpty) return;
     setState(() {
@@ -99,11 +153,10 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
 
     List<TrackItem> foundTracks = [];
 
-    // 1. Intentamos búsqueda musical limpia para tener títulos, portadas HD y letras exactas
     try {
       final itunesUrl = Uri.parse(
           'https://itunes.apple.com/search?term=${Uri.encodeComponent(query)}&entity=song&limit=25');
-      final res = await http.get(itunesUrl).timeout(const Duration(seconds: 6));
+      final res = await http.get(itunesUrl).timeout(const Duration(seconds: 5));
       if (res.statusCode == 200) {
         final data = json.decode(res.body);
         final List results = data['results'] ?? [];
@@ -114,13 +167,12 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
             artist: item['artistName'] ?? "Artista",
             thumb: (item['artworkUrl100'] as String? ?? "")
                 .replaceAll('100x100bb', '600x600bb'),
-            directAudioUrl: item['previewUrl'], // Respaldo instantáneo garantizado
+            previewUrl: item['previewUrl'],
           ));
         }
       }
     } catch (_) {}
 
-    // 2. Si no hubo resultados, usamos el buscador de YouTube directo
     if (foundTracks.isEmpty) {
       try {
         final results = await _yt.search.search(query);
@@ -141,7 +193,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     });
   }
 
-  // Motor Anti-Bloqueo: Intenta canción completa por YouTube/Piped y jamás falla
+  // Motor Directo de Pista Completa (Rápido y en formato M4A nativo para Android)
   Future<void> _playTrack(TrackItem track) async {
     setState(() {
       _currentTrack = track;
@@ -149,98 +201,92 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
       _currentLyrics = "Cargando letra de ${track.title}...";
     });
 
-    // Cargamos la letra en paralelo
     _fetchLyrics(track.title, track.artist);
 
-    String? streamUrlToPlay;
+    String? fullAudioUrl;
 
-    // PASO A: Si ya tenemos la pista lista o buscamos el stream completo en servidores libres
+    // 1. Buscamos la pista completa en YouTube usando el nuevo motor 2.5.3
     try {
-      // Buscamos el ID de video exacto para la canción completa
       String videoId = track.id;
-      if (track.directAudioUrl != null) {
-        // Es un resultado con nombre limpio, buscamos su equivalente completo en YouTube
-        final ytSearch = await _yt.search
-            .search("${track.title} ${track.artist} audio")
-            .timeout(const Duration(seconds: 5));
-        if (ytSearch.isNotEmpty) {
-          videoId = ytSearch.first.id.value;
+      // Si el ID es de catálogo (solo números), buscamos el video oficial de audio
+      if (RegExp(r'^[0-9]+$').hasMatch(track.id)) {
+        final searchList = await _yt.search
+            .search("${track.title} ${track.artist} official audio")
+            .timeout(const Duration(seconds: 4));
+        if (searchList.isNotEmpty) {
+          videoId = searchList.first.id.value;
         }
       }
 
-      // Intentamos extraer el audio completo con cliente Android VR
+      // Pedimos el stream usando clientes que no tienen bloqueo ni espera
       final manifest = await _yt.videos.streamsClient.getManifest(
         videoId,
-        ytClients: [YoutubeApiClient.androidVr, YoutubeApiClient.safari],
+        ytClients: [
+          YoutubeApiClient.ios,
+          YoutubeApiClient.androidVr,
+          YoutubeApiClient.safari,
+        ],
       ).timeout(const Duration(seconds: 5));
 
-      if (manifest.audioOnly.isNotEmpty) {
-        streamUrlToPlay = manifest.audioOnly.withHighestBitrate().url.toString();
+      // Preferimos contenedor mp4/m4a para que Android reproduzca la canción entera sin cortarse
+      final mp4Streams = manifest.audioOnly.where((s) => s.container.name == 'mp4').toList();
+      if (mp4Streams.isNotEmpty) {
+        mp4Streams.sort((a, b) => b.bitrate.compareTo(a.bitrate));
+        fullAudioUrl = mp4Streams.first.url.toString();
+      } else if (manifest.audioOnly.isNotEmpty) {
+        fullAudioUrl = manifest.audioOnly.withHighestBitrate().url.toString();
       }
-    } catch (_) {
-      // Si YouTube lanza RequestLimitExceededException, saltamos a los servidores espejo Piped
-    }
+    } catch (_) {}
 
-    // PASO B: Servidores Espejo Piped (Se saltan el bloqueo de IP de YouTube)
-    if (streamUrlToPlay == null) {
-      for (final instance in _pipedInstances) {
-        try {
-          final searchRes = await http
-              .get(Uri.parse(
-                  '$instance/search?q=${Uri.encodeComponent("${track.title} ${track.artist}")}&filter=music_songs'))
-              .timeout(const Duration(seconds: 4));
-          if (searchRes.statusCode == 200) {
-            final searchData = json.decode(searchRes.body);
-            final List items = searchData['items'] ?? [];
-            if (items.isNotEmpty) {
-              final String urlPath = items[0]['url'] ?? "";
-              final String vidId = urlPath.replaceAll('/watch?v=', '');
-              final streamRes = await http
-                  .get(Uri.parse('$instance/streams/$vidId'))
-                  .timeout(const Duration(seconds: 4));
-              if (streamRes.statusCode == 200) {
-                final streamData = json.decode(streamRes.body);
-                final List audioStreams = streamData['audioStreams'] ?? [];
-                if (audioStreams.isNotEmpty) {
-                  streamUrlToPlay = audioStreams[0]['url'];
-                  break;
-                }
+    // 2. Respaldo rápido por API espejo (Invidious/Piped) si YouTube restringe por país/edad
+    if (fullAudioUrl == null) {
+      try {
+        final q = Uri.encodeComponent("${track.title} ${track.artist} audio");
+        final res = await http
+            .get(Uri.parse("https://inv.nadeko.net/api/v1/search?q=$q&type=video"))
+            .timeout(const Duration(seconds: 4));
+        if (res.statusCode == 200) {
+          final List list = json.decode(res.body);
+          if (list.isNotEmpty) {
+            final vid = list[0]['videoId'];
+            final vRes = await http
+                .get(Uri.parse("https://inv.nadeko.net/api/v1/videos/$vid"))
+                .timeout(const Duration(seconds: 4));
+            if (vRes.statusCode == 200) {
+              final vData = json.decode(vRes.body);
+              final List formats = vData['adaptiveFormats'] ?? [];
+              final audioFormats = formats
+                  .where((f) => (f['type'] as String? ?? '').startsWith('audio/mp4'))
+                  .toList();
+              if (audioFormats.isNotEmpty) {
+                fullAudioUrl = audioFormats.first['url'];
               }
             }
           }
-        } catch (_) {}
-      }
+        }
+      } catch (_) {}
     }
 
-    // PASO C: Respaldo Directo Garantizado (Nunca falla ni tiene bloqueos)
-    streamUrlToPlay ??= track.directAudioUrl;
-
-    if (streamUrlToPlay != null) {
-      try {
-        await _player.setUrl(streamUrlToPlay);
-        _player.play();
-        setState(() => _isBuffering = false);
-      } catch (e) {
-        // Si el stream de YouTube dio error 403 al reproducir, activamos el respaldo directo
-        if (track.directAudioUrl != null && streamUrlToPlay != track.directAudioUrl) {
-          await _player.setUrl(track.directAudioUrl!);
-          _player.play();
-        }
-        setState(() => _isBuffering = false);
+    // 3. Reproducir pista completa (y solo si falla el internet, usar el preview de respaldo)
+    try {
+      if (fullAudioUrl != null) {
+        await _player.setUrl(fullAudioUrl);
+      } else if (track.previewUrl != null) {
+        await _player.setUrl(track.previewUrl!);
       }
-    } else {
+      _player.play();
       setState(() => _isBuffering = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Servidor ocupado, intenta con la siguiente pista.")),
-        );
+    } catch (_) {
+      if (track.previewUrl != null) {
+        await _player.setUrl(track.previewUrl!);
+        _player.play();
       }
+      setState(() => _isBuffering = false);
     }
   }
 
-  // Buscador de Letras Limpio (Doble motor: LRCLIB + Lyrics.ovh)
+  // Buscador de Letras
   Future<void> _fetchLyrics(String rawTitle, String rawArtist) async {
-    // Limpiamos palabras basura del título para que siempre encuentre la letra
     final cleanTitle = rawTitle
         .replaceAll(RegExp(r'\(.*?\)|\[.*?\]', caseSensitive: false), '')
         .replaceAll(RegExp(r'Official|Audio|Video|Visualizer|Lyrics|feat\..*|ft\..*', caseSensitive: false), '')
@@ -250,13 +296,12 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
         .first
         .trim();
 
-    final cleanArtist = rawArtist.replaceAll(' - Topic', '').trim();
+    final cleanArtist = rawArtist.replaceAll(' - Topic', '').split('&').first.trim();
 
-    // Intento 1: LRCLIB
     try {
       final url = Uri.parse(
           'https://lrclib.net/api/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}');
-      final response = await http.get(url).timeout(const Duration(seconds: 6));
+      final response = await http.get(url).timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         final List data = json.decode(utf8.decode(response.bodyBytes));
         if (data.isNotEmpty && data[0]['plainLyrics'] != null) {
@@ -266,35 +311,20 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
       }
     } catch (_) {}
 
-    // Intento 2: Búsqueda solo por título limpio en LRCLIB
     try {
-      final url2 = Uri.parse('https://lrclib.net/api/search?q=${Uri.encodeComponent(cleanTitle)}');
+      final url2 = Uri.parse(
+          'https://api.lyrics.ovh/v1/${Uri.encodeComponent(cleanArtist)}/${Uri.encodeComponent(cleanTitle)}');
       final response2 = await http.get(url2).timeout(const Duration(seconds: 5));
       if (response2.statusCode == 200) {
-        final List data2 = json.decode(utf8.decode(response2.bodyBytes));
-        if (data2.isNotEmpty && data2[0]['plainLyrics'] != null) {
-          setState(() => _currentLyrics = data2[0]['plainLyrics']);
+        final data2 = json.decode(utf8.decode(response2.bodyBytes));
+        if (data2['lyrics'] != null && data2['lyrics'].toString().isNotEmpty) {
+          setState(() => _currentLyrics = data2['lyrics']);
           return;
         }
       }
     } catch (_) {}
 
-    // Intento 3: Segundo servidor de letras (Lyrics.ovh)
-    try {
-      final url3 = Uri.parse(
-          'https://api.lyrics.ovh/v1/${Uri.encodeComponent(cleanArtist)}/${Uri.encodeComponent(cleanTitle)}');
-      final response3 = await http.get(url3).timeout(const Duration(seconds: 5));
-      if (response3.statusCode == 200) {
-        final data3 = json.decode(utf8.decode(response3.bodyBytes));
-        if (data3['lyrics'] != null && data3['lyrics'].toString().isNotEmpty) {
-          setState(() => _currentLyrics = data3['lyrics']);
-          return;
-        }
-      }
-    } catch (_) {}
-
-    setState(() => _currentLyrics =
-        "No encontramos la letra exacta para '$cleanTitle'.\nPrueba con otra canción popular.");
+    setState(() => _currentLyrics = "Letra no disponible para '$cleanTitle'.");
   }
 
   void _toggleFavorite(TrackItem track) {
@@ -306,6 +336,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
         _favorites.add(track);
       }
     });
+    _saveFavoritesToDisk();
   }
 
   bool _isFavorite(TrackItem track) {
@@ -347,7 +378,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     );
   }
 
-  // Pantalla Completa del Reproductor + Letras en Vivo
+  // Pantalla Completa del Reproductor + Controles Anterior/Siguiente
   void _openFullPlayer() {
     showModalBottomSheet(
       context: context,
@@ -365,134 +396,159 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
               minChildSize: 0.6,
               maxChildSize: 0.96,
               builder: (context, scrollController) {
-                return SingleChildScrollView(
-                  controller: scrollController,
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    children: [
-                      Container(
-                        width: 45,
-                        height: 5,
-                        decoration: BoxDecoration(
-                          color: Colors.white24,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(22),
-                        child: Image.network(
-                          _currentTrack.thumb,
-                          height: 250,
-                          width: 250,
-                          fit: BoxFit.cover,
-                        ),
-                      ),
-                      const SizedBox(height: 22),
-                      Text(
-                        _currentTrack.title,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        _currentTrack.artist,
-                        style: const TextStyle(fontSize: 15, color: Color(0xFF9CA3AF)),
-                      ),
-                      const SizedBox(height: 18),
-                      StreamBuilder<Duration>(
-                        stream: _player.positionStream,
-                        builder: (context, snapshot) {
-                          final pos = snapshot.data ?? Duration.zero;
-                          final total = _player.duration ?? const Duration(seconds: 30);
-                          final maxSec = total.inSeconds.toDouble() > 0 ? total.inSeconds.toDouble() : 1.0;
-                          return Column(
+                return StreamBuilder<PlayerState>(
+                  stream: _player.playerStateStream,
+                  builder: (context, stateSnap) {
+                    final isPlaying = _player.playing &&
+                        stateSnap.data?.processingState != ProcessingState.completed;
+                    return SingleChildScrollView(
+                      controller: scrollController,
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        children: [
+                          Container(
+                            width: 45,
+                            height: 5,
+                            decoration: BoxDecoration(
+                              color: Colors.white24,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(22),
+                            child: Image.network(
+                              _currentTrack.thumb,
+                              height: 250,
+                              width: 250,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                          const SizedBox(height: 22),
+                          Text(
+                            _currentTrack.title,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            _currentTrack.artist,
+                            style: const TextStyle(fontSize: 15, color: Color(0xFF9CA3AF)),
+                          ),
+                          const SizedBox(height: 18),
+                          StreamBuilder<Duration>(
+                            stream: _player.positionStream,
+                            builder: (context, snapshot) {
+                              final pos = snapshot.data ?? Duration.zero;
+                              final total = _player.duration ?? Duration.zero;
+                              final maxSec = total.inSeconds.toDouble() > 0
+                                  ? total.inSeconds.toDouble()
+                                  : 1.0;
+                              return Column(
+                                children: [
+                                  Slider(
+                                    activeColor: const Color(0xFFA855F7),
+                                    value: pos.inSeconds.toDouble().clamp(0, maxSec),
+                                    max: maxSec,
+                                    onChanged: (val) {
+                                      _player.seek(Duration(seconds: val.toInt()));
+                                    },
+                                  ),
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text("${pos.inMinutes}:${(pos.inSeconds % 60).toString().padLeft(2, '0')}"),
+                                      Text("${total.inMinutes}:${(total.inSeconds % 60).toString().padLeft(2, '0')}"),
+                                    ],
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 10),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                             children: [
-                              Slider(
-                                activeColor: const Color(0xFFA855F7),
-                                value: pos.inSeconds.toDouble().clamp(0, maxSec),
-                                max: maxSec,
-                                onChanged: (val) {
-                                  _player.seek(Duration(seconds: val.toInt()));
+                              IconButton(
+                                icon: Icon(
+                                  _isFavorite(_currentTrack) ? Icons.favorite : Icons.favorite_border,
+                                  color: Colors.purpleAccent,
+                                  size: 30,
+                                ),
+                                onPressed: () {
+                                  _toggleFavorite(_currentTrack);
+                                  setModalState(() {});
                                 },
                               ),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text("${pos.inMinutes}:${(pos.inSeconds % 60).toString().padLeft(2, '0')}"),
-                                  Text("${total.inMinutes}:${(total.inSeconds % 60).toString().padLeft(2, '0')}"),
-                                ],
+                              IconButton(
+                                icon: const Icon(Icons.skip_previous_rounded, size: 38),
+                                onPressed: () {
+                                  _playPrevTrack();
+                                  setModalState(() {});
+                                },
+                              ),
+                              IconButton(
+                                icon: Icon(
+                                  isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                                  size: 72,
+                                  color: const Color(0xFFA855F7),
+                                ),
+                                onPressed: () {
+                                  if (isPlaying) {
+                                    _player.pause();
+                                  } else {
+                                    if (_player.processingState == ProcessingState.completed) {
+                                      _player.seek(Duration.zero);
+                                    }
+                                    _player.play();
+                                  }
+                                  setModalState(() {});
+                                },
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.skip_next_rounded, size: 38),
+                                onPressed: () {
+                                  _playNextTrack();
+                                  setModalState(() {});
+                                },
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.replay_rounded, size: 28),
+                                onPressed: () => _player.seek(Duration.zero),
                               ),
                             ],
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 10),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [
-                          IconButton(
-                            icon: Icon(
-                              _isFavorite(_currentTrack) ? Icons.favorite : Icons.favorite_border,
-                              color: Colors.purpleAccent,
-                              size: 32,
-                            ),
-                            onPressed: () {
-                              _toggleFavorite(_currentTrack);
-                              setModalState(() {});
-                            },
                           ),
-                          IconButton(
-                            icon: Icon(
-                              _player.playing ? Icons.pause_circle_filled : Icons.play_circle_filled,
-                              size: 70,
-                              color: const Color(0xFFA855F7),
+                          const SizedBox(height: 24),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(20),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1A1825),
+                              borderRadius: BorderRadius.circular(22),
+                              border: Border.all(color: const Color(0xFFA855F7).withOpacity(0.3)),
                             ),
-                            onPressed: () {
-                              if (_player.playing) {
-                                _player.pause();
-                              } else {
-                                _player.play();
-                              }
-                              setModalState(() {});
-                            },
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.replay_rounded, size: 30),
-                            onPressed: () => _player.seek(Duration.zero),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Row(
+                                  children: [
+                                    Icon(Icons.lyrics_rounded, color: Color(0xFFA855F7)),
+                                    SizedBox(width: 8),
+                                    Text("Letra de la canción", style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                                  ],
+                                ),
+                                const Divider(color: Colors.white12, height: 24),
+                                Text(
+                                  _currentLyrics,
+                                  style: const TextStyle(fontSize: 15.5, height: 1.65, color: Colors.white),
+                                ),
+                              ],
+                            ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 24),
-                      // Sección de Letras (Karaoke)
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(20),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1A1825),
-                          borderRadius: BorderRadius.circular(22),
-                          border: Border.all(color: const Color(0xFFA855F7).withOpacity(0.3)),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Row(
-                              children: [
-                                Icon(Icons.lyrics_rounded, color: Color(0xFFA855F7)),
-                                SizedBox(width: 8),
-                                Text("Letra de la canción", style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
-                              ],
-                            ),
-                            const Divider(color: Colors.white12, height: 24),
-                            Text(
-                              _currentLyrics,
-                              style: const TextStyle(fontSize: 15.5, height: 1.65, color: Colors.white),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
+                    );
+                  },
                 );
               },
             );
@@ -520,7 +576,6 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Encabezado
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -554,8 +609,6 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
                     ],
                   ),
                   const SizedBox(height: 20),
-
-                  // Buscador
                   TextField(
                     controller: _searchController,
                     onSubmitted: _searchMusic,
@@ -577,7 +630,6 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
                     ),
                   ),
                   const SizedBox(height: 24),
-
                   if (_selectedTab == 2) ...[
                     const Text("Mi Biblioteca (Favoritos ❤️)", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 12),
@@ -739,7 +791,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    _isBuffering ? "Conectando audio..." : "Toca aquí para ver la Letra 🎤",
+                                    _isBuffering ? "Cargando canción completa..." : "Toca aquí para ver la Letra 🎤",
                                     style: TextStyle(fontSize: 11, color: Colors.purpleAccent.shade100),
                                   ),
                                   Text(
@@ -767,6 +819,10 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
                                   }
                                 },
                               ),
+                            IconButton(
+                              icon: const Icon(Icons.skip_next_rounded, size: 28),
+                              onPressed: _playNextTrack,
+                            ),
                           ],
                         ),
                       ),
