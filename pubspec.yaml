@@ -1,7 +1,7 @@
 name: aura_music
-description: Reproductor de musica Open Source sin anuncios.
+description: Aura Liquid Glass Music Player
 publish_to: 'none'
-version: 1.2.0+3
+version: 2.0.0+10
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -9,16 +9,16 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  just_audio: ^0.9.42
-  youtube_explode_dart: ^2.5.3
-  http: ^1.2.2
-  url_launcher: ^6.3.0
-  shared_preferences: ^2.3.2
+  just_audio: any
+  youtube_explode_dart: any
+  http: any
+  url_launcher: any
+  shared_preferences: any
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^3.0.0
+  flutter_lints: any
 
 flutter:
   uses-material-design: true
