@@ -6,7 +6,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart';
+import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -211,7 +211,6 @@ class _AuraMainScreenState extends State<AuraMainScreen>
     super.dispose();
   }
 
-  // Persistencia local de Favoritos e Historial
   Future<void> _loadSavedData() async {
     final prefs = await SharedPreferences.getInstance();
     final favList = prefs.getStringList('aura_favs_v2') ?? [];
@@ -235,7 +234,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
   }
 
   // ==========================================================================
-  // BUSCADOR MULTICAPA (Combina Catálogo HD + YouTube IDs)
+  // BUSCADOR MULTICAPA (Combina Catálogo 320kbps + YouTube IDs)
   // ==========================================================================
   Future<void> _searchMusic(String query, {bool switchTab = true}) async {
     if (query.trim().isEmpty) return;
@@ -246,45 +245,51 @@ class _AuraMainScreenState extends State<AuraMainScreen>
 
     List<TrackItem> results = [];
 
-    // 1. Intentamos catálogo directo con URL de 320kbps pre-cargada (Saavn API)
-    try {
-      final saavnUrl = Uri.parse(
-          "https://saavn.sumit.co/api/search/songs?query=${Uri.encodeComponent(query)}&limit=15");
-      final res = await http.get(saavnUrl).timeout(const Duration(seconds: 4));
-      if (res.statusCode == 200) {
-        final data = json.decode(res.body);
-        final List items = data['data']?['results'] ?? [];
-        for (var item in items) {
-          final List imgs = item['image'] ?? [];
-          final List dls = item['downloadUrl'] ?? [];
-          final String thumbUrl = imgs.isNotEmpty
-              ? (imgs.last['url'] ?? imgs.last['link'] ?? '')
-              : '';
-          final String audioUrl = dls.isNotEmpty
-              ? (dls.last['url'] ?? dls.last['link'] ?? '')
-              : '';
-          final String artistName = (item['artists']?['primary'] as List?)
-                  ?.map((a) => a['name'])
-                  .join(', ') ??
-              item['primaryArtists'] ??
-              'Artista';
+    // 1. Catálogo directo con enlace M4A/320kbps listo (Saavn APIs)
+    final saavnSearchApis = [
+      "https://saavn.sumit.co/api/search/songs?query=${Uri.encodeComponent(query)}&limit=15",
+      "https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${Uri.encodeComponent(query)}",
+    ];
 
-          if (audioUrl.isNotEmpty) {
-            results.add(TrackItem(
-              id: item['id']?.toString() ?? '',
-              title: _cleanHtml(item['name'] ?? 'Canción'),
-              artist: _cleanHtml(artistName),
-              thumb: thumbUrl.isNotEmpty
-                  ? thumbUrl
-                  : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500',
-              directUrl: audioUrl,
-            ));
+    for (final apiUrl in saavnSearchApis) {
+      if (results.isNotEmpty) break;
+      try {
+        final res = await http.get(Uri.parse(apiUrl)).timeout(const Duration(seconds: 4));
+        if (res.statusCode == 200) {
+          final data = json.decode(res.body);
+          final List items = data['data']?['results'] ?? [];
+          for (var item in items) {
+            final List imgs = item['image'] ?? [];
+            final List dls = item['downloadUrl'] ?? [];
+            final String thumbUrl = imgs.isNotEmpty
+                ? (imgs.last['url'] ?? imgs.last['link'] ?? '')
+                : '';
+            final String audioUrl = dls.isNotEmpty
+                ? (dls.last['url'] ?? dls.last['link'] ?? '')
+                : '';
+            final String artistName = (item['artists']?['primary'] as List?)
+                    ?.map((a) => a['name'])
+                    .join(', ') ??
+                item['primaryArtists'] ??
+                'Artista';
+
+            if (audioUrl.isNotEmpty) {
+              results.add(TrackItem(
+                id: item['id']?.toString() ?? '',
+                title: _cleanHtml(item['name'] ?? 'Canción'),
+                artist: _cleanHtml(artistName.toString()),
+                thumb: thumbUrl.isNotEmpty
+                    ? thumbUrl
+                    : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500',
+                directUrl: audioUrl,
+              ));
+            }
           }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
-    // 2. Complementamos con búsqueda directa de YouTube para que jamás falte ninguna canción
+    // 2. Complemento con búsqueda de YouTube
     try {
       final ytList = await _yt.search
           .search("$query official audio")
@@ -315,7 +320,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
   }
 
   // ==========================================================================
-  // MOTOR DE AUDIO INFALIBLE (Archivo Local Temporal + 320kbps Directo)
+  // MOTOR DE AUDIO INFALIBLE (320kbps Directo + Archivo Físico Local Temporal)
   // ==========================================================================
   Future<void> _playTrack(TrackItem track) async {
     setState(() {
@@ -324,13 +329,11 @@ class _AuraMainScreenState extends State<AuraMainScreen>
       _statusMessage = "Sincronizando audio HD...";
     });
 
-    // Guardar en historial reciente
     _recentTracks.removeWhere((t) => t.title == track.title);
     _recentTracks.insert(0, track);
     if (_recentTracks.length > 15) _recentTracks.removeLast();
     _saveData();
 
-    // Disparar búsqueda de letras sincronizadas tipo Apple Music en paralelo
     _fetchSyncedLyrics(track.title, track.artist);
 
     try {
@@ -342,9 +345,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
         .trim();
     final cleanArtist = track.artist.split(',').first.split('&').first.trim();
 
-    // ------------------------------------------------------------------------
-    // NIVEL 1: Si la canción ya trae enlace directo M4A/320kbps, suena en 0.5s
-    // ------------------------------------------------------------------------
+    // NIVEL 1: Si ya trae URL directa de 320kbps, reproduce al instante
     if (track.directUrl != null && track.directUrl!.isNotEmpty) {
       try {
         await _player.setUrl(track.directUrl!).timeout(const Duration(seconds: 5));
@@ -357,9 +358,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
       } catch (_) {}
     }
 
-    // ------------------------------------------------------------------------
-    // NIVEL 2: Buscar versión 320kbps en servidores espejo de música
-    // ------------------------------------------------------------------------
+    // NIVEL 2: Buscar stream 320kbps en espejos de música
     final mirrorEndpoints = [
       "https://saavn.sumit.co/api/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
       "https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}",
@@ -390,11 +389,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
       } catch (_) {}
     }
 
-    // ------------------------------------------------------------------------
-    // NIVEL 3: DESCARGA A ARCHIVO FÍSICO TEMPORAL EN EL TELÉFONO
-    // Esto elimina al 100% el error 403 de ExoPlayer en Android porque
-    // reproduce el archivo desde la memoria interna del celular.
-    // ------------------------------------------------------------------------
+    // NIVEL 3: Descarga rápida a archivo temporal físico en el teléfono (Cero error 403)
     setState(() => _statusMessage = "Desbloqueando pista desde la nube...");
 
     String videoId = track.id;
@@ -435,12 +430,11 @@ class _AuraMainScreenState extends State<AuraMainScreen>
           }
 
           if (chosenStream != null) {
-            // Primero intentamos descarga rápida a caché físico del teléfono
             try {
               final tempDir = Directory.systemTemp;
               final tempFile = File('${tempDir.path}/aura_track_$videoId.mp4');
 
-              if (!await tempFile.exists() || await tempFile.length() < 50000) {
+              if (!await tempFile.exists() || await tempFile.length() < 40000) {
                 final byteStream = _yt.videos.streamsClient.get(chosenStream);
                 final sink = tempFile.openWrite();
                 await byteStream.pipe(sink).timeout(const Duration(seconds: 12));
@@ -458,11 +452,10 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                 return;
               }
             } catch (_) {
-              // Si la descarga por pipe tarda, intentamos URL directa con User-Agent nativo
               await _player.setAudioSource(
                 AudioSource.uri(
                   chosenStream.url,
-                  headers: const {'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 13)'},
+                  headers: const {'User-Agent': 'Mozilla/5.0'},
                 ),
               ).timeout(const Duration(seconds: 5));
               _player.play();
@@ -484,7 +477,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
   }
 
   // ==========================================================================
-  // MOTOR DE LETRAS SINCRONIZADAS EN TIEMPO REAL (PARSEADOR LRC)
+  // MOTOR DE LETRAS SINCRONIZADAS EN TIEMPO REAL (KARAOKE LRC)
   // ==========================================================================
   Future<void> _fetchSyncedLyrics(String rawTitle, String rawArtist) async {
     setState(() {
@@ -516,7 +509,6 @@ class _AuraMainScreenState extends State<AuraMainScreen>
       if (res.statusCode == 200) {
         final List list = json.decode(utf8.decode(res.bodyBytes));
         if (list.isNotEmpty) {
-          // Buscamos primero alguna que tenga syncedLyrics (con tiempos exactos)
           final syncedItem = list.firstWhere(
             (item) => item['syncedLyrics'] != null && item['syncedLyrics'].toString().isNotEmpty,
             orElse: () => list.first,
@@ -634,7 +626,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                 borderRadius: const BorderRadius.vertical(top: Radius.circular(38)),
                 child: Stack(
                   children: [
-                    // 1. FONDO DINÁMICO ANIMADO CON LA PORTADA DEL ÁLBUM (Apple Music Blur)
+                    // 1. FONDO DINÁMICO ANIMADO CON LA PORTADA DEL ÁLBUM
                     Positioned.fill(
                       child: AnimatedBuilder(
                         animation: _ambientController,
@@ -686,7 +678,6 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                           padding: const EdgeInsets.fromLTRB(24, 14, 24, 24),
                           child: Column(
                             children: [
-                              // Píldora superior de arrastre
                               Container(
                                 width: 46,
                                 height: 5,
@@ -697,7 +688,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                               ),
                               const SizedBox(height: 16),
 
-                              // Selector Superior: Portada Viva vs Karaoke Sincronizado
+                              // Selector Superior: Portada Viva vs Letra en Vivo
                               LiquidGlassBox(
                                 borderRadius: 100,
                                 padding: const EdgeInsets.all(5),
@@ -809,7 +800,6 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                                               );
                                             }
 
-                                            // Calcular qué línea está cantando el artista en este milisegundo
                                             int activeIndex = 0;
                                             for (int i = 0; i < _syncedLyrics.length; i++) {
                                               if (currentPos >= _syncedLyrics[i].time) {
@@ -819,7 +809,6 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                                               }
                                             }
 
-                                            // Auto-scroll suave tipo Apple Music
                                             if (activeIndex != lastScrolledIndex &&
                                                 lyricsScrollController.hasClients) {
                                               lastScrolledIndex = activeIndex;
@@ -1000,7 +989,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                                   children: [
                                     IconButton(
-                                      icon: const Icon(Icons.Lyrics_outlined, size: 26),
+                                      icon: const Icon(Icons.lyrics_outlined, size: 26),
                                       onPressed: () =>
                                           setModalState(() => showLyricsView = !showLyricsView),
                                     ),
@@ -1201,7 +1190,6 @@ class _AuraMainScreenState extends State<AuraMainScreen>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Mini-Reproductor
                   GestureDetector(
                     onTap: _openLiquidPlayer,
                     child: LiquidGlassBox(
@@ -1283,7 +1271,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                   ),
                   const SizedBox(height: 10),
 
-                  // Barra de Navegación Flotante iOS 19 Liquid Glass
+                  // Barra de Navegación Flotante iOS Liquid Glass
                   LiquidGlassBox(
                     borderRadius: 100,
                     padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
@@ -1291,7 +1279,7 @@ class _AuraMainScreenState extends State<AuraMainScreen>
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
                         _glassNavItem(0, Icons.home_rounded, "Inicio"),
-                        _glassNavItem(1, Icons.Graphic_eq_rounded, "Explorar"),
+                        _glassNavItem(1, Icons.graphic_eq_rounded, "Explorar"),
                         _glassNavItem(2, Icons.favorite_rounded, "Biblioteca"),
                       ],
                     ),
@@ -1336,7 +1324,6 @@ class _AuraMainScreenState extends State<AuraMainScreen>
 
   Widget _buildCurrentTabContent() {
     if (_selectedTab == 2) {
-      // PESTAÑA BIBLIOTECA Y FAVORITOS
       return ListView(
         key: const ValueKey("tab_library"),
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 175),
@@ -1360,7 +1347,6 @@ class _AuraMainScreenState extends State<AuraMainScreen>
     }
 
     if (_selectedTab == 1) {
-      // PESTAÑA EXPLORAR / RESULTADOS
       return ListView(
         key: const ValueKey("tab_explore"),
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 175),
@@ -1381,12 +1367,10 @@ class _AuraMainScreenState extends State<AuraMainScreen>
       );
     }
 
-    // PESTAÑA 0: INICIO
     return ListView(
       key: const ValueKey("tab_home"),
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 175),
       children: [
-        // Tarjeta Principal Liquid Glass
         LiquidGlassBox(
           borderRadius: 28,
           padding: const EdgeInsets.all(22),
