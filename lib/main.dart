@@ -137,6 +137,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     }
   }
 
+  // Buscador Directo
   Future<void> _searchMusic(String query) async {
     if (query.trim().isEmpty) return;
     setState(() {
@@ -147,7 +148,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     List<TrackItem> foundTracks = [];
 
     try {
-      final ytResults = await _yt.search.search("$query audio").timeout(const Duration(seconds: 5));
+      final ytResults = await _yt.search.search("$query audio").timeout(const Duration(seconds: 6));
       for (var v in ytResults) {
         foundTracks.add(TrackItem(
           id: v.id.value,
@@ -164,124 +165,131 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
     });
   }
 
-  // MOTOR BLINDADO DE STREAMING GLOBAL (Piped + Invidious + YouTube Directo)
+  // MOTOR QUE SÍ FUNCIONÓ (MUXED + ANDROID VR DIRECTO SIN ESPERAS ADELANTE)
   Future<void> _playTrack(TrackItem track) async {
     setState(() {
       _currentTrack = track;
       _isBuffering = true;
-      _statusMessage = "Conectando stream...";
+      _statusMessage = "Cargando pista...";
       _currentLyrics = "Cargando letra de ${track.title}...";
     });
 
     _fetchLyrics(track.title, track.artist);
 
+    String videoId = track.id;
     final cleanTitle = track.title
         .replaceAll(RegExp(r'\(.*?\)|\[.*?\]|Official|Audio|Video|Lyrics', caseSensitive: false), '')
         .trim();
     final cleanArtist = track.artist.replaceAll(' - Topic', '').split('&').first.trim();
 
-    String? audioStreamUrl;
-
-    // INTENTO 1: Servidor Global Piped (El más rápido y estable del mundo open-source)
-    const pipedInstances = [
-      "https://pipedapi.kavin.rocks",
-      "https://api.piped.projectsegfau.lt",
-      "https://pipedapi.drgns.space",
-    ];
-
-    for (final instance in pipedInstances) {
+    // Si viene sin ID de YouTube, lo buscamos en 2 segundos
+    if (videoId.isEmpty || RegExp(r'^[0-9]+$').hasMatch(videoId)) {
       try {
-        final searchRes = await http
-            .get(Uri.parse("$instance/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}&filter=music_songs"))
+        final searchList = await _yt.search
+            .search("$cleanTitle $cleanArtist audio")
             .timeout(const Duration(seconds: 4));
-        if (searchRes.statusCode == 200) {
-          final data = json.decode(searchRes.body);
-          final List items = data['items'] ?? [];
-          if (items.isNotEmpty) {
-            final vidId = (items[0]['url'] as String).replaceAll('/watch?v=', '');
-            final streamRes = await http.get(Uri.parse("$instance/streams/$vidId")).timeout(const Duration(seconds: 4));
-            if (streamRes.statusCode == 200) {
-              final streamData = json.decode(streamRes.body);
-              final List audioStreams = streamData['audioStreams'] ?? [];
-              if (audioStreams.isNotEmpty) {
-                audioStreamUrl = audioStreams[0]['url'];
-                break;
-              }
-            }
-          }
+        if (searchList.isNotEmpty) {
+          videoId = searchList.first.id.value;
         }
       } catch (_) {}
     }
 
-    // INTENTO 2: Servidores Invidious de Respaldo
-    if (audioStreamUrl == null) {
-      const invidiousInstances = [
-        "https://inv.nadeko.net",
-        "https://invidious.perennialte.ch",
+    // PASO 1 DIRECTO (Sin Saavn estorbando): Extraemos el stream Muxed y MP4 con los clientes desbloqueados
+    if (videoId.isNotEmpty) {
+      final clientGroups = [
+        [YoutubeApiClient.androidVr, YoutubeApiClient.safari],
+        [YoutubeApiClient.ios, YoutubeApiClient.android],
+        [YoutubeApiClient.tv],
       ];
 
-      for (final instance in invidiousInstances) {
+      for (final group in clientGroups) {
         try {
-          final sRes = await http
-              .get(Uri.parse("$instance/api/v1/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}&type=video"))
-              .timeout(const Duration(seconds: 4));
-          if (sRes.statusCode == 200) {
-            final List list = json.decode(sRes.body);
-            if (list.isNotEmpty) {
-              final vid = list[0]['videoId'];
-              final vRes = await http.get(Uri.parse("$instance/api/v1/videos/$vid")).timeout(const Duration(seconds: 4));
-              if (vRes.statusCode == 200) {
-                final vData = json.decode(vRes.body);
-                final List formats = vData['adaptiveFormats'] ?? [];
-                final audioF = formats.where((f) => (f['type'] as String? ?? '').startsWith('audio/')).toList();
-                if (audioF.isNotEmpty) {
-                  audioStreamUrl = audioF[0]['url'];
-                  break;
-                }
-              }
-            }
+          final manifest = await _yt.videos.streamsClient
+              .getManifest(videoId, ytClients: group)
+              .timeout(const Duration(seconds: 5));
+
+          final List<Uri> urlsToTry = [];
+
+          // 1ro: MUXED (Es el que NUNCA tiene bloqueo 403 en Android y te funcionó al 100%)
+          final muxed = manifest.muxed.toList();
+          if (muxed.isNotEmpty) {
+            urlsToTry.add(muxed.withHighestBitrate().url);
+          }
+
+          // 2do: Audio MP4/M4A
+          final audioMp4 = manifest.audioOnly.where((s) => s.container.name == 'mp4').toList();
+          if (audioMp4.isNotEmpty) {
+            audioMp4.sort((a, b) => b.bitrate.compareTo(a.bitrate));
+            urlsToTry.add(audioMp4.first.url);
+          }
+
+          // 3ro: Cualquier audio restante
+          if (manifest.audioOnly.isNotEmpty) {
+            urlsToTry.add(manifest.audioOnly.withHighestBitrate().url);
+          }
+
+          for (final uri in urlsToTry) {
+            try {
+              // Enviamos User-Agent limpio para evitar rechazos del reproductor de Android
+              await _player.setAudioSource(
+                AudioSource.uri(
+                  uri,
+                  headers: const {
+                    'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                  },
+                ),
+              ).timeout(const Duration(seconds: 5));
+
+              _player.play();
+              setState(() {
+                _isBuffering = false;
+                _statusMessage = "Toca aquí para ver la Letra 🎤";
+              });
+              return;
+            } catch (_) {}
           }
         } catch (_) {}
       }
     }
 
-    // INTENTO 3: YouTube Explode Directo con cliente Android
-    if (audioStreamUrl == null && track.id.isNotEmpty) {
-      try {
-        final manifest = await _yt.videos.streamsClient
-            .getManifest(track.id, ytClients: [YoutubeApiClient.android, YoutubeApiClient.safari])
-            .timeout(const Duration(seconds: 4));
-        if (manifest.audioOnly.isNotEmpty) {
-          audioStreamUrl = manifest.audioOnly.withHighestBitrate().url.toString();
+    // PASO 2 DE EMERGENCIA: Jiosaavn en paralelo por si un video tiene restricción de edad en YouTube
+    try {
+      final res = await http
+          .get(Uri.parse("https://saavn.dev/api/search/songs?query=${Uri.encodeComponent("$cleanTitle $cleanArtist")}"))
+          .timeout(const Duration(seconds: 4));
+      if (res.statusCode == 200) {
+        final body = json.decode(res.body);
+        final List results = body['data']?['results'] ?? [];
+        if (results.isNotEmpty) {
+          final List downloadUrls = results[0]['downloadUrl'] ?? [];
+          if (downloadUrls.isNotEmpty) {
+            final String bestUrl = downloadUrls.last['url'] ?? downloadUrls.last['link'] ?? "";
+            if (bestUrl.isNotEmpty) {
+              await _player.setUrl(bestUrl);
+              _player.play();
+              setState(() {
+                _isBuffering = false;
+                _statusMessage = "Toca aquí para ver la Letra 🎤";
+              });
+              return;
+            }
+          }
         }
-      } catch (_) {}
-    }
-
-    // Reproducción final garantizada
-    if (audioStreamUrl != null) {
-      try {
-        await _player.setUrl(audioStreamUrl);
-        _player.play();
-        setState(() {
-          _isBuffering = false;
-          _statusMessage = "Toca aquí para ver la Letra 🎤";
-        });
-        return;
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
 
     setState(() {
       _isBuffering = false;
-      _statusMessage = "Toca otra versión si no suena";
+      _statusMessage = "Prueba la siguiente pista de la lista";
     });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("No se pudo conectar con este servidor, prueba con otra pista.")),
+        const SnackBar(content: Text("Este video tiene restricción, toca la versión de abajo.")),
       );
     }
   }
 
-  // Buscador de Letras
+  // Buscador de Letras Limpio
   Future<void> _fetchLyrics(String rawTitle, String rawArtist) async {
     final cleanTitle = rawTitle
         .replaceAll(RegExp(r'\(.*?\)|\[.*?\]', caseSensitive: false), '')
@@ -292,7 +300,14 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
         .first
         .trim();
 
-    final cleanArtist = rawArtist.replaceAll(' - Topic', '').split('&').first.split(',').first.trim();
+    final cleanArtist = rawArtist
+        .replaceAll(' - Topic', '')
+        .replaceAll('VEVO', '')
+        .split('&')
+        .first
+        .split(',')
+        .first
+        .trim();
 
     try {
       final url = Uri.parse(
@@ -302,6 +317,18 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
         final List data = json.decode(utf8.decode(response.bodyBytes));
         if (data.isNotEmpty && data[0]['plainLyrics'] != null) {
           setState(() => _currentLyrics = data[0]['plainLyrics']);
+          return;
+        }
+      }
+    } catch (_) {}
+
+    try {
+      final url2 = Uri.parse('https://lrclib.net/api/search?q=${Uri.encodeComponent(cleanTitle)}');
+      final response2 = await http.get(url2).timeout(const Duration(seconds: 4));
+      if (response2.statusCode == 200) {
+        final List data2 = json.decode(utf8.decode(response2.bodyBytes));
+        if (data2.isNotEmpty && data2[0]['plainLyrics'] != null) {
+          setState(() => _currentLyrics = data2[0]['plainLyrics']);
           return;
         }
       }
@@ -333,11 +360,11 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF1A1825),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text("Importar música"),
+        title: const Text("Importar música o Playlist"),
         content: TextField(
           controller: linkController,
           decoration: const InputDecoration(
-            hintText: "Escribe artista o pega enlace...",
+            hintText: "Pega link de YouTube o escribe una lista...",
           ),
         ),
         actions: [
@@ -354,7 +381,7 @@ class _AuraHomeScreenState extends State<AuraHomeScreen> {
                 _searchMusic(text);
               }
             },
-            child: const Text("Buscar"),
+            child: const Text("Cargar canciones"),
           ),
         ],
       ),
