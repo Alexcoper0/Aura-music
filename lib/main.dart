@@ -87,7 +87,7 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
   final YoutubeExplode _yt = YoutubeExplode();
   final TextEditingController _searchController = TextEditingController();
 
-  int _selectedTab = 0; // 0: Inicio, 1: Buscar, 2: Biblioteca
+  int _selectedTab = 0;
   List<TrackItem> _searchResults = [];
   List<TrackItem> _favorites = [];
   List<TrackItem> _recentTracks = [];
@@ -100,9 +100,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
   List<LyricLine> _syncedLyrics = [];
   String _plainLyrics = "Busca y reproduce cualquier canción para ver su letra.";
   bool _hasSyncedLyrics = false;
-
-  // Caché en memoria de enlaces ya resueltos para reproducción instantánea
-  final Map<String, String> _resolvedUrlsCache = {};
 
   @override
   void initState() {
@@ -143,9 +140,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
         'aura_clean_recents', _recentTracks.map((e) => json.encode(e.toJson())).toList());
   }
 
-  // ==========================================================================
-  // BUSCADOR DE PORTADAS CUADRADAS HD (Sin franjas negras de YouTube)
-  // ==========================================================================
   Future<void> _searchMusic(String query) async {
     final cleanQuery = query.trim();
     if (cleanQuery.isEmpty) return;
@@ -158,40 +152,38 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
 
     List<TrackItem> found = [];
 
-    // 1. Obtenemos nombres limpios y carátulas cuadradas perfectas (600x600) sin bordes negros
+    // Buscamos directamente en YouTube para asegurar que cada resultado tenga su Video ID listo para sonar
     try {
-      final url = Uri.parse(
-          'https://itunes.apple.com/search?term=${Uri.encodeComponent(cleanQuery)}&entity=song&limit=25');
-      final res = await http.get(url).timeout(const Duration(seconds: 5));
-      if (res.statusCode == 200) {
-        final data = json.decode(res.body);
-        final List list = data['results'] ?? [];
-        for (var item in list) {
-          final String art = (item['artworkUrl100'] as String? ?? '')
-              .replaceAll('100x100bb', '600x600bb');
-          found.add(TrackItem(
-            id: '', // Se resuelve al instante en YouTube al tocar
-            title: item['trackName'] ?? 'Canción',
-            artist: item['artistName'] ?? 'Artista',
-            thumb: art.isNotEmpty
-                ? art
-                : 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500',
-          ));
-        }
+      final ytRes = await _yt.search.search("$cleanQuery official audio").timeout(const Duration(seconds: 6));
+      for (var v in ytRes) {
+        found.add(TrackItem(
+          id: v.id.value,
+          title: v.title,
+          artist: v.author.replaceAll(' - Topic', '').replaceAll('VEVO', ''),
+          thumb: v.thumbnails.highResUrl,
+        ));
       }
     } catch (_) {}
 
-    // 2. Si el catálogo de portadas no responde, usamos búsqueda directa de YouTube
+    // Respaldo con iTunes si YouTube llegara a tardar
     if (found.isEmpty) {
       try {
-        final ytRes = await _yt.search.search("$cleanQuery official audio");
-        for (var v in ytRes) {
-          found.add(TrackItem(
-            id: v.id.value,
-            title: v.title,
-            artist: v.author.replaceAll(' - Topic', ''),
-            thumb: v.thumbnails.highResUrl,
-          ));
+        final url = Uri.parse(
+            'https://itunes.apple.com/search?term=${Uri.encodeComponent(cleanQuery)}&entity=song&limit=20');
+        final res = await http.get(url).timeout(const Duration(seconds: 4));
+        if (res.statusCode == 200) {
+          final data = json.decode(res.body);
+          final List list = data['results'] ?? [];
+          for (var item in list) {
+            final String art = (item['artworkUrl100'] as String? ?? '')
+                .replaceAll('100x100bb', '600x600bb');
+            found.add(TrackItem(
+              id: '',
+              title: item['trackName'] ?? 'Canción',
+              artist: item['artistName'] ?? 'Artista',
+              thumb: art.isNotEmpty ? art : 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500',
+            ));
+          }
         }
       } catch (_) {}
     }
@@ -205,53 +197,39 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
   }
 
   // ==========================================================================
-  // MOTOR DE AUDIO QUE SÍ FUNCIONÓ EN TU CELULAR (SIN RETRASOS ADELANTE)
+  // MOTOR DE AUDIO BLINDADO (Extrae el flujo Muxed y MP4 Directo)
   // ==========================================================================
   Future<void> _playTrack(TrackItem track) async {
     setState(() {
       _currentTrack = track;
       _isBuffering = true;
-      _statusMessage = "Cargando pista...";
+      _statusMessage = "Conectando stream...";
     });
 
-    // Guardar en historial reciente
     _recentTracks.removeWhere((t) => t.title == track.title && t.artist == track.artist);
     _recentTracks.insert(0, track);
     if (_recentTracks.length > 12) _recentTracks.removeLast();
     _saveData();
 
-    // Buscar letra sincronizada en paralelo
     _fetchSyncedLyrics(track.title, track.artist);
 
-    final cacheKey = "${track.title}_${track.artist}";
+    try {
+      await _player.stop();
+    } catch (_) {}
 
     try {
-      // Si ya habíamos cargado esta canción antes, suena en 0.2 segundos
-      if (_resolvedUrlsCache.containsKey(cacheKey)) {
-        await _player.setUrl(_resolvedUrlsCache[cacheKey]!);
-        _player.play();
-        setState(() {
-          _isBuffering = false;
-          _statusMessage = "Sonando en alta calidad";
-        });
-        return;
-      }
-
-      // 1. Obtener el ID exacto de YouTube para la pista de audio oficial
       String videoId = track.id;
       if (videoId.isEmpty) {
         final searchList = await _yt.search
-            .search("${track.title} ${track.artist} official audio")
-            .timeout(const Duration(seconds: 5));
+            .search("${track.title} ${track.artist} audio")
+            .timeout(const Duration(seconds: 4));
         if (searchList.isNotEmpty) {
           videoId = searchList.first.id.value;
         }
       }
 
-      if (videoId.isEmpty) throw Exception("No video ID");
+      if (videoId.isEmpty) throw Exception("Sin ID");
 
-      // 2. Extraer el Manifiesto exactamente con el método que SÍ te funcionó:
-      // Clientes androidVr + safari + ios, priorizando el stream MUXED y MP4
       final manifest = await _yt.videos.streamsClient.getManifest(
         videoId,
         ytClients: [
@@ -259,11 +237,10 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
           YoutubeApiClient.safari,
           YoutubeApiClient.ios,
         ],
-      ).timeout(const Duration(seconds: 6));
+      ).timeout(const Duration(seconds: 5));
 
       final List<String> candidateUrls = [];
 
-      // El stream muxed fue el que permitió que tu Android reprodujera la canción completa sin Error 403
       if (manifest.muxed.isNotEmpty) {
         candidateUrls.add(manifest.muxed.withHighestBitrate().url.toString());
       }
@@ -282,33 +259,27 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
 
       for (final streamUrl in candidateUrls) {
         try {
-          await _player.setUrl(streamUrl).timeout(const Duration(seconds: 6));
-          _resolvedUrlsCache[cacheKey] = streamUrl;
+          await _player.setUrl(streamUrl).timeout(const Duration(seconds: 5));
           _player.play();
           if (mounted) {
             setState(() {
               _isBuffering = false;
-              _statusMessage = "Toca para ver la letra en vivo 🎤";
+              _statusMessage = "Toca para ver la letra 🎤";
             });
           }
           return;
-        } catch (_) {
-          // Si el primer candidato falla, prueba el siguiente inmediatamente
-        }
+        } catch (_) {}
       }
     } catch (_) {}
 
     if (mounted) {
       setState(() {
         _isBuffering = false;
-        _statusMessage = "No se pudo abrir, intenta otra pista";
+        _statusMessage = "Toca otra versión de la lista";
       });
     }
   }
 
-  // ==========================================================================
-  // BUSCADOR DE LETRAS SINCRONIZADAS (LRC KARAOKE)
-  // ==========================================================================
   Future<void> _fetchSyncedLyrics(String rawTitle, String rawArtist) async {
     setState(() {
       _syncedLyrics = [];
@@ -325,7 +296,7 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
     try {
       final url = Uri.parse(
           'https://lrclib.net/api/search?q=${Uri.encodeComponent("$cleanTitle $cleanArtist")}');
-      final res = await http.get(url).timeout(const Duration(seconds: 5));
+      final res = await http.get(url).timeout(const Duration(seconds: 4));
       if (res.statusCode == 200) {
         final List list = json.decode(utf8.decode(res.bodyBytes));
         if (list.isNotEmpty) {
@@ -427,12 +398,12 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF161421),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-        title: const Text("Importar o Buscar Música"),
+        title: const Text("Importar o Buscar"),
         content: TextField(
           controller: linkController,
           autofocus: true,
           decoration: const InputDecoration(
-            hintText: "Escribe artista, canción o pega enlace...",
+            hintText: "Escribe artista o canción...",
           ),
         ),
         actions: [
@@ -456,9 +427,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
     );
   }
 
-  // ==========================================================================
-  // REPRODUCTOR PANTALLA COMPLETA (60 FPS FLUIDO + KARAOKE EN VIVO)
-  // ==========================================================================
   void _openFullPlayer() {
     if (_currentTrack == null) return;
     showModalBottomSheet(
@@ -509,8 +477,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
                         ),
                       ),
                       const SizedBox(height: 16),
-
-                      // Selector Portada vs Letra Sincronizada
                       Container(
                         padding: const EdgeInsets.all(4),
                         decoration: BoxDecoration(
@@ -563,8 +529,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
                         ),
                       ),
                       const SizedBox(height: 24),
-
-                      // Vista Central: Portada Elástica Apple Music o Karaoke
                       Expanded(
                         child: !showLyricsView
                             ? Center(
@@ -690,8 +654,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
                               ),
                       ),
                       const SizedBox(height: 20),
-
-                      // Título y Corazón
                       Row(
                         children: [
                           Expanded(
@@ -734,8 +696,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
                         ],
                       ),
                       const SizedBox(height: 10),
-
-                      // Barra de tiempo real
                       StreamBuilder<Duration>(
                         stream: _player.positionStream,
                         builder: (context, snapshot) {
@@ -778,8 +738,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
                         },
                       ),
                       const SizedBox(height: 12),
-
-                      // Controles principales
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
@@ -844,9 +802,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
     );
   }
 
-  // ==========================================================================
-  // INTERFAZ PRINCIPAL LIMPIA Y ULTRA FLUIDA (SIN BLURS PESADOS EN LISTAS)
-  // ==========================================================================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -855,7 +810,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
           children: [
             Column(
               children: [
-                // Encabezado original de Aura
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 14, 20, 10),
                   child: Row(
@@ -901,8 +855,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
                     ],
                   ),
                 ),
-
-                // Barra de Búsqueda Limpia
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
                   child: TextField(
@@ -931,15 +883,11 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
                     ),
                   ),
                 ),
-
-                // Contenido principal a 60 FPS
                 Expanded(
                   child: _buildBody(),
                 ),
               ],
             ),
-
-            // Mini-Reproductor Flotante (Solo aparece o muestra la pista actual con Cristal real)
             if (_currentTrack != null)
               Align(
                 alignment: Alignment.bottomCenter,
@@ -1053,7 +1001,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
 
   Widget _buildBody() {
     if (_selectedTab == 2) {
-      // MI BIBLIOTECA
       return ListView(
         padding: const EdgeInsets.fromLTRB(20, 14, 20, 100),
         children: [
@@ -1078,7 +1025,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
     }
 
     if (_selectedTab == 1) {
-      // BUSCADOR
       if (_isLoading) {
         return const Center(child: CircularProgressIndicator());
       }
@@ -1098,11 +1044,9 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
       );
     }
 
-    // PESTAÑA 0: INICIO (100% NEUTRO, FIEL AL DISEÑO ORIGINAL QUE TE GUSTÓ)
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 14, 20, 100),
       children: [
-        // Tarjeta Principal con el Degradado Original de Aura
         GestureDetector(
           onTap: _showImportDialog,
           child: Container(
@@ -1157,8 +1101,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
           ),
         ),
         const SizedBox(height: 28),
-
-        // Sección Tus Playlists (Diseño limpio original)
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -1199,7 +1141,6 @@ class _AuraMainScreenState extends State<AuraMainScreen> {
             ],
           ),
         ),
-
         if (_recentTracks.isNotEmpty) ...[
           const SizedBox(height: 22),
           Row(
